@@ -668,3 +668,119 @@ void MainWindow::updateMonitorCharts()
 
     watcher->setFuture(QtConcurrent::run([options, cardIds]() {
         NpuInfoProvider provider;
+        provider.setConnectionOptions(options);
+        return provider.collectMonitor(cardIds);
+    }));
+}
+
+void MainWindow::updateProcessPanel()
+{
+    if (m_processTable == nullptr || m_processSummaryLabel == nullptr) {
+        return;
+    }
+
+    if (m_processInProgress || m_scanInProgress) {
+        return;
+    }
+
+    const QString cardId = selectedCardId();
+    const bool showAllCards = cardId.isEmpty();
+    const QString targetCardId = showAllCards ? QString() : cardId;
+    const NpuConnectionOptions options = m_activeConnectionOptions;
+    m_processInProgress = true;
+
+    auto *watcher = new QFutureWatcher<QVector<NpuProcessInfo>>(this);
+    connect(watcher, &QFutureWatcher<QVector<NpuProcessInfo>>::finished, this, [this, watcher, showAllCards, cardId]() {
+        const QVector<NpuProcessInfo> processes = watcher->result();
+        watcher->deleteLater();
+        m_processInProgress = false;
+
+        m_processTable->clearSpans();
+        m_processTable->setRowCount(processes.size());
+
+        for (int row = 0; row < processes.size(); ++row) {
+            const NpuProcessInfo &process = processes.at(row);
+            m_processTable->setItem(row, 0, new QTableWidgetItem(displayValue(process.pid)));
+            m_processTable->setItem(row, 1, new QTableWidgetItem(displayValue(process.processName)));
+            m_processTable->setItem(row, 2, new QTableWidgetItem(displayValue(process.cardId)));
+            m_processTable->setItem(row, 3, new QTableWidgetItem(displayValue(process.chipId)));
+            m_processTable->setItem(row, 4, new QTableWidgetItem(displayValue(process.memoryMb)));
+        }
+
+        if (showAllCards) {
+            m_processSummaryLabel->setText(
+                QStringLiteral("All Cards | Processes: %1 | Refresh: 1s")
+                    .arg(processes.size()));
+        } else {
+            m_processSummaryLabel->setText(
+                QStringLiteral("Card %1 | Processes: %2 | Refresh: 1s")
+                    .arg(cardId)
+                    .arg(processes.size()));
+        }
+    });
+
+    watcher->setFuture(QtConcurrent::run([options, targetCardId]() {
+        NpuInfoProvider provider;
+        provider.setConnectionOptions(options);
+        return provider.collectProcesses(targetCardId);
+    }));
+}
+
+void MainWindow::showChartsPage()
+{
+    if (m_monitorStack == nullptr || m_chartPage == nullptr) {
+        return;
+    }
+
+    m_monitorStack->setCurrentWidget(m_chartPage);
+    if (m_chartViewButton != nullptr) {
+        m_chartViewButton->setChecked(true);
+    }
+}
+
+void MainWindow::showProcessPage()
+{
+    if (m_monitorStack == nullptr || m_processPage == nullptr) {
+        return;
+    }
+
+    m_monitorStack->setCurrentWidget(m_processPage);
+    if (m_processViewButton != nullptr) {
+        m_processViewButton->setChecked(true);
+    }
+
+    updateProcessPanel();
+}
+
+void MainWindow::updateConnectionModeUi()
+{
+    if (!kRemoteFeatureEnabled) {
+        if (m_localModeRadio != nullptr) {
+            m_localModeRadio->setChecked(true);
+        }
+        if (m_remoteModeRadio != nullptr) {
+            m_remoteModeRadio->setChecked(false);
+            m_remoteModeRadio->setVisible(false);
+        }
+    }
+
+    const bool remoteMode = kRemoteFeatureEnabled && m_remoteModeRadio != nullptr && m_remoteModeRadio->isChecked();
+
+    if (m_userLabel != nullptr) {
+        m_userLabel->setVisible(remoteMode);
+    }
+    if (m_userEdit != nullptr) {
+        m_userEdit->setVisible(remoteMode);
+    }
+    if (m_hostLabel != nullptr) {
+        m_hostLabel->setVisible(remoteMode);
+    }
+    if (m_hostEdit != nullptr) {
+        m_hostEdit->setVisible(remoteMode);
+    }
+    if (m_passwordLabel != nullptr) {
+        m_passwordLabel->setVisible(remoteMode);
+    }
+    if (m_passwordEdit != nullptr) {
+        m_passwordEdit->setVisible(remoteMode);
+    }
