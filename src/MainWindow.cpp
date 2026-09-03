@@ -548,3 +548,123 @@ void MainWindow::updateSelectedCardMappings()
         if (sameText || sameNumber) {
             filteredMappings.append(mapping);
         }
+    }
+    populateMappings(filteredMappings);
+    updateProcessPanel();
+}
+
+void MainWindow::updateMonitorCharts()
+{
+    if (m_scanInProgress) {
+        return;
+    }
+
+    if (m_monitorInProgress) {
+        m_monitorRefreshPending = true;
+        return;
+    }
+
+    QStringList cardIds;
+    const QString selectedCard = selectedCardId();
+    if (!selectedCard.isEmpty()) {
+        cardIds.append(selectedCard);
+    } else {
+        cardIds = currentCardIds();
+    }
+
+    if (cardIds.isEmpty()) {
+        return;
+    }
+
+    m_monitorInProgress = true;
+    const NpuConnectionOptions options = m_activeConnectionOptions;
+
+    auto *watcher = new QFutureWatcher<NpuMonitorSnapshot>(this);
+    connect(watcher, &QFutureWatcher<NpuMonitorSnapshot>::finished, this, [this, watcher]() {
+        const NpuMonitorSnapshot snapshot = watcher->result();
+        watcher->deleteLater();
+        m_monitorInProgress = false;
+
+        ++m_sampleIndex;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+        double aicoreSum = 0.0;
+        double aivectorSum = 0.0;
+        double aicpuSum = 0.0;
+        int aicoreCount = 0;
+        int aivectorCount = 0;
+        int aicpuCount = 0;
+
+        for (const NpuCoreMonitor &monitor : snapshot.coreMonitors) {
+            const QString coreKey = QStringLiteral("%1-c%2").arg(monitor.cardId, monitor.chipId);
+
+            if (monitor.hasTemperature) {
+                auto *series = ensureSeries(&m_tempSeriesByCore, m_tempChart, m_tempAxisX, m_tempAxisY,
+                                            coreKey, coreKey, colorFromKey(coreKey));
+                appendSeriesPoint(series, nowMs, monitor.temperature);
+            }
+
+            if (monitor.hasMemoryUsageRate) {
+                auto *series = ensureSeries(&m_memorySeriesByCore, m_memoryChart, m_memoryAxisX, m_memoryAxisY,
+                                            coreKey, coreKey, colorFromKey(coreKey));
+                appendSeriesPoint(series, nowMs, monitor.memoryUsageRate);
+            }
+
+            if (monitor.hasAicoreUsage) {
+                aicoreSum += monitor.aicoreUsage;
+                ++aicoreCount;
+            }
+            if (monitor.hasAivectorUsage) {
+                aivectorSum += monitor.aivectorUsage;
+                ++aivectorCount;
+            }
+            if (monitor.hasAicpuUsage) {
+                aicpuSum += monitor.aicpuUsage;
+                ++aicpuCount;
+            }
+        }
+
+        if (aicoreCount > 0) {
+            appendSeriesPoint(m_aicoreSeries, nowMs, aicoreSum / aicoreCount);
+        }
+        if (aivectorCount > 0) {
+            appendSeriesPoint(m_aivectorSeries, nowMs, aivectorSum / aivectorCount);
+        }
+        if (aicpuCount > 0) {
+            appendSeriesPoint(m_aicpuSeries, nowMs, aicpuSum / aicpuCount);
+        }
+
+        for (const NpuPowerMonitor &powerMonitor : snapshot.powerMonitors) {
+            if (!powerMonitor.hasPower) {
+                continue;
+            }
+            const QString key = QStringLiteral("card-%1").arg(powerMonitor.cardId);
+            auto *series = ensureSeries(&m_powerSeriesByCard, m_powerChart, m_powerAxisX, m_powerAxisY,
+                                        key, key, colorFromKey(key));
+            appendSeriesPoint(series, nowMs, powerMonitor.power);
+        }
+
+        const QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(nowMs);
+        const QDateTime minTime = maxTime.addSecs(-(m_maxSamples - 1));
+        m_tempAxisX->setRange(minTime, maxTime);
+        m_memoryAxisX->setRange(minTime, maxTime);
+        m_powerAxisX->setRange(minTime, maxTime);
+        m_usageAxisX->setRange(minTime, maxTime);
+
+        if (!snapshot.errors.isEmpty()) {
+            m_statusLabel->setText(QStringLiteral("Monitor refresh has %1 issue(s).").arg(snapshot.errors.size()));
+        }
+
+        if (m_monitorRefreshPending) {
+            m_monitorRefreshPending = false;
+            updateMonitorCharts();
+            return;
+        }
+
+        if (m_monitorStack != nullptr && m_monitorStack->currentWidget() == m_processPage) {
+            updateProcessPanel();
+        }
+    });
+
+    watcher->setFuture(QtConcurrent::run([options, cardIds]() {
+        NpuInfoProvider provider;
