@@ -387,3 +387,164 @@ void MainWindow::setupChart(
 
     (*chart)->addAxis(*axisX, Qt::AlignBottom);
     (*chart)->addAxis(*axisY, Qt::AlignLeft);
+
+    *view = new QChartView(*chart, m_monitorPanel);
+    (*view)->setRenderHint(QPainter::Antialiasing);
+}
+
+void MainWindow::refreshData()
+{
+    if (m_scanInProgress) {
+        return;
+    }
+
+    m_statusLabel->setText(QStringLiteral("Refreshing device inventory..."));
+
+    const NpuConnectionOptions options = currentConnectionOptions();
+    m_activeConnectionOptions = options;
+    m_scanInProgress = true;
+
+    auto *watcher = new QFutureWatcher<NpuScanResult>(this);
+    connect(watcher, &QFutureWatcher<NpuScanResult>::finished, this, [this, watcher]() {
+        m_lastResult = watcher->result();
+        watcher->deleteLater();
+        m_scanInProgress = false;
+
+        const QString versionText = m_lastResult.npuSmiVersion.trimmed();
+        m_npuSmiVersionLabel->setText(
+            versionText.isEmpty()
+                ? QString()
+                : QStringLiteral("npu-smi: %1").arg(versionText));
+
+        populateCards(m_lastResult.cards);
+        updateSelectedCardMappings();
+
+        if (!m_lastResult.errorMessage.isEmpty()) {
+            m_statusLabel->setText(m_lastResult.errorMessage);
+        } else if (m_lastResult.hasData()) {
+            m_statusLabel->setText(QStringLiteral("Loaded %1 card(s) and %2 mapping row(s).")
+                                       .arg(m_lastResult.cards.size())
+                                       .arg(m_lastResult.mappings.size()));
+        } else {
+            m_statusLabel->setText(QStringLiteral("No NPU information was returned by npu-smi."));
+        }
+
+        m_updatedLabel->setText(QStringLiteral("Last update: %1")
+                                    .arg(QDateTime::currentDateTime().toString(Qt::ISODate)));
+
+        updateMonitorCharts();
+        updateProcessPanel();
+    });
+
+    watcher->setFuture(QtConcurrent::run([options]() {
+        NpuInfoProvider provider;
+        provider.setConnectionOptions(options);
+        return provider.scan();
+    }));
+}
+
+void MainWindow::populateCards(const QVector<NpuCard> &cards)
+{
+    m_cardTable->clearSpans();
+    m_cardTable->setRowCount(cards.size());
+
+    for (int row = 0; row < cards.size(); ++row) {
+        const NpuCard &card = cards.at(row);
+        m_cardTable->setItem(row, 0, new QTableWidgetItem(displayValue(card.cardId)));
+        m_cardTable->setItem(row, 1, new QTableWidgetItem(displayValue(card.softwareVersion)));
+        m_cardTable->setItem(row, 2, new QTableWidgetItem(displayValue(card.firmwareVersion)));
+        m_cardTable->setItem(row, 3, new QTableWidgetItem(displayValue(card.productName)));
+        m_cardTable->setItem(row, 4, new QTableWidgetItem(displayValue(card.serialNumber)));
+        m_cardTable->setItem(row, 5, new QTableWidgetItem(displayValue(card.chipCount)));
+        m_cardTable->setItem(row, 6, new QTableWidgetItem(displayValue(card.memoryTotal)));
+        m_cardTable->setItem(row, 7, new QTableWidgetItem(displayValue(card.health)));
+    }
+
+    if (cards.isEmpty()) {
+        m_cardTable->setRowCount(0);
+        m_cardTable->verticalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        return;
+    }
+
+    if (cards.size() > 10) {
+        m_cardTable->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    } else {
+        m_cardTable->verticalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    }
+
+    m_cardTable->clearSelection();
+    m_cardTable->setCurrentCell(-1, -1);
+}
+
+void MainWindow::populateMappings(const QVector<NpuMappingEntry> &mappings)
+{
+    QVector<NpuMappingEntry> visibleMappings;
+    for (const NpuMappingEntry &entry : mappings) {
+        if (entry.chipName.trimmed().compare(QStringLiteral("Mcu"), Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+        visibleMappings.append(entry);
+    }
+
+    m_mappingTable->clearSpans();
+    m_mappingTable->setRowCount(visibleMappings.size());
+
+    for (int row = 0; row < visibleMappings.size(); ++row) {
+        const NpuMappingEntry &entry = visibleMappings.at(row);
+        m_mappingTable->setItem(row, 0, new QTableWidgetItem(displayValue(entry.logicId)));
+        m_mappingTable->setItem(row, 1, new QTableWidgetItem(displayValue(entry.cardId)));
+        m_mappingTable->setItem(row, 2, new QTableWidgetItem(displayValue(entry.chipId)));
+        m_mappingTable->setItem(row, 3, new QTableWidgetItem(displayValue(entry.chipName)));
+        m_mappingTable->setItem(row, 4, new QTableWidgetItem(displayValue(entry.memoryTotal)));
+        m_mappingTable->setItem(row, 5, new QTableWidgetItem(displayValue(entry.aiCore)));
+        m_mappingTable->setItem(row, 6, new QTableWidgetItem(displayValue(entry.controlCore)));
+        m_mappingTable->setItem(row, 7, new QTableWidgetItem(displayValue(entry.dataCore)));
+    }
+
+    if (visibleMappings.isEmpty()) {
+        m_mappingTable->setRowCount(0);
+        m_mappingTable->verticalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        return;
+    }
+
+    if (!selectedCardId().isEmpty()) {
+        m_mappingTable->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+        m_mappingTable->verticalHeader()->setDefaultSectionSize(28);
+    } else if (visibleMappings.size() > 10) {
+        m_mappingTable->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    } else {
+        m_mappingTable->verticalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    }
+}
+
+void MainWindow::updateSelectedCardMappings()
+{
+    const QString cardId = selectedCardId();
+    if (m_selectedMonitorCardId != cardId) {
+        m_selectedMonitorCardId = cardId;
+        resetMonitorSeries();
+        if (m_monitorInProgress) {
+            m_monitorRefreshPending = true;
+        } else {
+            updateMonitorCharts();
+        }
+    }
+
+    if (cardId.isEmpty()) {
+        populateMappings(m_lastResult.mappings);
+        updateProcessPanel();
+        return;
+    }
+
+    QVector<NpuMappingEntry> filteredMappings;
+    bool selectedOk = false;
+    const int selectedCardInt = cardId.toInt(&selectedOk);
+    for (const NpuMappingEntry &mapping : m_lastResult.mappings) {
+        const QString mappingId = mapping.cardId.trimmed();
+        bool mappingOk = false;
+        const int mappingInt = mappingId.toInt(&mappingOk);
+        const bool sameText = mappingId == cardId;
+        const bool sameNumber = selectedOk && mappingOk && selectedCardInt == mappingInt;
+        if (sameText || sameNumber) {
+            filteredMappings.append(mapping);
+        }
