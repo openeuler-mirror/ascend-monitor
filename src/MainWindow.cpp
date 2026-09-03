@@ -784,3 +784,169 @@ void MainWindow::updateConnectionModeUi()
     if (m_passwordEdit != nullptr) {
         m_passwordEdit->setVisible(remoteMode);
     }
+    if (m_remoteConnectButton != nullptr) {
+        m_remoteConnectButton->setVisible(remoteMode);
+    }
+}
+
+NpuConnectionOptions MainWindow::currentConnectionOptions() const
+{
+    NpuConnectionOptions options;
+    options.useSsh = kRemoteFeatureEnabled && m_remoteModeRadio != nullptr && m_remoteModeRadio->isChecked();
+    options.user = m_userEdit != nullptr ? m_userEdit->text().trimmed() : QString();
+    options.host = m_hostEdit != nullptr ? m_hostEdit->text().trimmed() : QString();
+    options.password = m_passwordEdit != nullptr ? m_passwordEdit->text() : QString();
+    return options;
+}
+
+void MainWindow::resetMonitorSeries()
+{
+    for (QLineSeries *series : std::as_const(m_tempSeriesByCore)) {
+        if (series != nullptr && m_tempChart != nullptr) {
+            m_tempChart->removeSeries(series);
+            delete series;
+        }
+    }
+    m_tempSeriesByCore.clear();
+
+    for (QLineSeries *series : std::as_const(m_memorySeriesByCore)) {
+        if (series != nullptr && m_memoryChart != nullptr) {
+            m_memoryChart->removeSeries(series);
+            delete series;
+        }
+    }
+    m_memorySeriesByCore.clear();
+
+    for (QLineSeries *series : std::as_const(m_powerSeriesByCard)) {
+        if (series != nullptr && m_powerChart != nullptr) {
+            m_powerChart->removeSeries(series);
+            delete series;
+        }
+    }
+    m_powerSeriesByCard.clear();
+
+    if (m_aicoreSeries != nullptr) {
+        m_aicoreSeries->clear();
+    }
+    if (m_aivectorSeries != nullptr) {
+        m_aivectorSeries->clear();
+    }
+    if (m_aicpuSeries != nullptr) {
+        m_aicpuSeries->clear();
+    }
+
+    m_sampleIndex = 0;
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::MouseButtonPress) {
+        QWidget *clickedWidget = qobject_cast<QWidget *>(watched);
+
+        const auto clickedInTable = [clickedWidget](QTableWidget *table) -> bool {
+            if (table == nullptr || clickedWidget == nullptr) {
+                return false;
+            }
+            return clickedWidget == table || table->isAncestorOf(clickedWidget);
+        };
+
+        const bool insideAnyTable = clickedInTable(m_cardTable)
+            || clickedInTable(m_mappingTable)
+            || clickedInTable(m_processTable);
+
+        if (!insideAnyTable) {
+            if (m_cardTable != nullptr) {
+                m_cardTable->clearSelection();
+                m_cardTable->setCurrentCell(-1, -1);
+            }
+            if (m_mappingTable != nullptr) {
+                m_mappingTable->clearSelection();
+                m_mappingTable->setCurrentCell(-1, -1);
+            }
+            if (m_processTable != nullptr) {
+                m_processTable->clearSelection();
+                m_processTable->setCurrentCell(-1, -1);
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+QString MainWindow::selectedCardId() const
+{
+    const int row = m_cardTable->currentRow();
+    if (row >= 0) {
+        const QTableWidgetItem *item = m_cardTable->item(row, 0);
+        if (item != nullptr) {
+            return item->text().trimmed();
+        }
+    }
+
+    const auto selectedItems = m_cardTable->selectedItems();
+    if (!selectedItems.isEmpty()) {
+        return selectedItems.first()->text().trimmed();
+    }
+
+    return QString();
+}
+
+QStringList MainWindow::currentCardIds() const
+{
+    QStringList ids;
+    for (const NpuCard &card : m_lastResult.cards) {
+        if (!card.cardId.trimmed().isEmpty()) {
+            ids.append(card.cardId.trimmed());
+        }
+    }
+    ids.removeDuplicates();
+    return ids;
+}
+
+void MainWindow::appendSeriesPoint(QLineSeries *series, qint64 timestampMs, double y)
+{
+    if (series == nullptr) {
+        return;
+    }
+
+    series->append(static_cast<qreal>(timestampMs), y);
+    while (series->count() > m_maxSamples) {
+        series->remove(0);
+    }
+}
+
+QLineSeries *MainWindow::ensureSeries(
+    QHash<QString, QLineSeries *> *seriesMap,
+    QChart *chart,
+    QDateTimeAxis *axisX,
+    QValueAxis *axisY,
+    const QString &key,
+    const QString &label,
+    const QColor &color)
+{
+    if (chart == nullptr || axisX == nullptr || axisY == nullptr) {
+        return nullptr;
+    }
+
+    if (seriesMap != nullptr && seriesMap->contains(key)) {
+        return seriesMap->value(key);
+    }
+
+    auto *series = new QLineSeries(chart);
+    series->setName(label);
+    if (color.isValid()) {
+        QPen pen(color);
+        pen.setWidth(2);
+        series->setPen(pen);
+    }
+
+    chart->addSeries(series);
+    series->attachAxis(axisX);
+    series->attachAxis(axisY);
+
+    if (seriesMap != nullptr) {
+        seriesMap->insert(key, series);
+    }
+
+    return series;
+}
