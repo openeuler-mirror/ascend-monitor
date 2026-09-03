@@ -559,3 +559,68 @@ double NpuInfoProvider::parseNumericValue(const QString &value, bool *ok) const
 }
 
 QStringList NpuInfoProvider::extractCardIds(const QVector<NpuCard> &cards, const QVector<NpuMappingEntry> &mappings) const
+{
+    QStringList ids;
+
+    for (const NpuCard &card : cards) {
+        const QString id = card.cardId.trimmed();
+        if (!id.isEmpty() && !ids.contains(id)) {
+            ids.append(id);
+        }
+    }
+
+    for (const NpuMappingEntry &mapping : mappings) {
+        const QString id = mapping.cardId.trimmed();
+        if (!id.isEmpty() && !ids.contains(id)) {
+            ids.append(id);
+        }
+    }
+
+    return ids;
+}
+
+CommandAttempt NpuInfoProvider::runCommand(const QStringList &arguments) const
+{
+    CommandAttempt attempt;
+    attempt.command = arguments.join(QStringLiteral(" "));
+
+    if (m_connectionOptions.useSsh) {
+        const QString remoteCmd = QStringLiteral("npu-smi %1").arg(arguments.join(QStringLiteral(" ")));
+        const QString sshCmd = QStringLiteral("sshpass -p '%1' ssh -o StrictHostKeyChecking=no -p %2 %3@%4 %5")
+                                   .arg(m_connectionOptions.password)
+                                   .arg(m_connectionOptions.port)
+                                   .arg(m_connectionOptions.user)
+                                   .arg(m_connectionOptions.host)
+                                   .arg(remoteCmd);
+
+        QProcess process;
+        process.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), sshCmd});
+        process.waitForFinished(30000);
+
+        attempt.exitCode = process.exitCode();
+        attempt.stdOut = QString::fromUtf8(process.readAllStandardOutput());
+        attempt.stdErr = QString::fromUtf8(process.readAllStandardError());
+    } else {
+        const QString npuSmiPath = QStandardPaths::findExecutable(QStringLiteral("npu-smi"));
+        if (npuSmiPath.isEmpty()) {
+            attempt.exitCode = -1;
+            attempt.stdErr = QStringLiteral("npu-smi not found in PATH");
+            return attempt;
+        }
+
+        QProcess process;
+        process.start(npuSmiPath, arguments);
+        process.waitForFinished(30000);
+
+        attempt.exitCode = process.exitCode();
+        attempt.stdOut = QString::fromUtf8(process.readAllStandardOutput());
+        attempt.stdErr = QString::fromUtf8(process.readAllStandardError());
+    }
+
+    return attempt;
+}
+
+QString NpuInfoProvider::cleanValue(QString value) const
+{
+    return value.trimmed();
+}
