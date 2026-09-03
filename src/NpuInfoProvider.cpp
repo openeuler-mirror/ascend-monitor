@@ -275,3 +275,169 @@ QVector<NpuMappingEntry> NpuInfoProvider::parseMapping(const QString &output) co
             entry.cardId = parts.value(0);
             entry.chipId = parts.value(1);
             entry.logicId = parts.value(2);
+            entry.chipName = parts.value(3);
+            if (parts.size() >= 5) entry.memoryTotal = parts.value(4);
+            if (parts.size() >= 6) entry.aiCore = parts.value(5);
+            if (parts.size() >= 7) entry.controlCore = parts.value(6);
+            if (parts.size() >= 8) entry.dataCore = parts.value(7);
+            entries.append(entry);
+        }
+    }
+
+    return entries;
+}
+
+void NpuInfoProvider::parseBoardVersions(
+    const QString &output, QString *softwareVersion, QString *firmwareVersion) const
+{
+    const QStringList lines = output.split('\n');
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.contains(QStringLiteral("Software Version")) || trimmed.contains(QStringLiteral("software version"))) {
+            const int colonPos = trimmed.indexOf(':');
+            if (colonPos >= 0 && softwareVersion) {
+                *softwareVersion = trimmed.mid(colonPos + 1).trimmed();
+            }
+        }
+        if (trimmed.contains(QStringLiteral("Firmware Version")) || trimmed.contains(QStringLiteral("firmware version"))) {
+            const int colonPos = trimmed.indexOf(':');
+            if (colonPos >= 0 && firmwareVersion) {
+                *firmwareVersion = trimmed.mid(colonPos + 1).trimmed();
+            }
+        }
+    }
+}
+
+QMap<QString, QString> NpuInfoProvider::parseMemoryByChip(const QString &output, QString *cardMemoryTotal) const
+{
+    QMap<QString, QString> result;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        if (trimmed.contains(QStringLiteral("Memory Total")) || trimmed.contains(QStringLiteral("Total Memory"))) {
+            const int colonPos = trimmed.indexOf(':');
+            if (colonPos >= 0 && cardMemoryTotal) {
+                *cardMemoryTotal = trimmed.mid(colonPos + 1).trimmed();
+            }
+        }
+
+        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (match.hasMatch()) {
+            result[match.captured(1)] = match.captured(2).trimmed();
+        }
+    }
+
+    return result;
+}
+
+QMap<QString, QString> NpuInfoProvider::parseHealthByChip(const QString &output) const
+{
+    QMap<QString, QString> result;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (match.hasMatch()) {
+            result[match.captured(1)] = match.captured(2).trimmed();
+        }
+    }
+
+    return result;
+}
+
+QMap<QString, double> NpuInfoProvider::parseTemperatureByChip(const QString &output) const
+{
+    QMap<QString, double> result;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*([\\d.]+)"));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (match.hasMatch()) {
+            bool ok = false;
+            const double value = match.captured(2).toDouble(&ok);
+            if (ok) {
+                result[match.captured(1)] = value;
+            }
+        }
+    }
+
+    return result;
+}
+
+QMap<QString, NpuInfoProvider::UsageMetrics> NpuInfoProvider::parseUsageByChip(const QString &output) const
+{
+    QMap<QString, UsageMetrics> result;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (!match.hasMatch()) {
+            continue;
+        }
+
+        const QString chipId = match.captured(1);
+        const QString values = match.captured(2).trimmed();
+
+        if (!result.contains(chipId)) {
+            result[chipId] = UsageMetrics();
+        }
+
+        UsageMetrics &metrics = result[chipId];
+
+        if (trimmed.contains(QStringLiteral("Memory Usage Rate")) || trimmed.contains(QStringLiteral("Memory Usage"))) {
+            bool ok = false;
+            const double val = parseNumericValue(values, &ok);
+            if (ok) {
+                metrics.memoryUsageRate = val;
+                metrics.hasMemoryUsageRate = true;
+            }
+        }
+        if (trimmed.contains(QStringLiteral("AICore"))) {
+            bool ok = false;
+            const double val = parseNumericValue(values, &ok);
+            if (ok) {
+                metrics.aicoreUsage = val;
+                metrics.hasAicoreUsage = true;
+            }
+        }
+        if (trimmed.contains(QStringLiteral("AIVector"))) {
+            bool ok = false;
+            const double val = parseNumericValue(values, &ok);
+            if (ok) {
+                metrics.aivectorUsage = val;
+                metrics.hasAivectorUsage = true;
+            }
+        }
+        if (trimmed.contains(QStringLiteral("AICPU"))) {
+            bool ok = false;
+            const double val = parseNumericValue(values, &ok);
+            if (ok) {
+                metrics.aicpuUsage = val;
+                metrics.hasAicpuUsage = true;
+            }
+        }
+    }
