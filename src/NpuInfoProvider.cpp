@@ -441,3 +441,121 @@ QMap<QString, NpuInfoProvider::UsageMetrics> NpuInfoProvider::parseUsageByChip(c
             }
         }
     }
+
+    return result;
+}
+
+QMap<QString, NpuInfoProvider::CpuNumConfig> NpuInfoProvider::parseCpuNumCfgByChip(const QString &output) const
+{
+    QMap<QString, CpuNumConfig> result;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
+        const QRegularExpressionMatch match = re.match(trimmed);
+        if (!match.hasMatch()) {
+            continue;
+        }
+
+        const QString chipId = match.captured(1);
+        const QString values = match.captured(2).trimmed();
+
+        if (!result.contains(chipId)) {
+            result[chipId] = CpuNumConfig();
+        }
+
+        CpuNumConfig &config = result[chipId];
+
+        if (trimmed.contains(QStringLiteral("AI Core"))) {
+            config.aiCore = values;
+        }
+        if (trimmed.contains(QStringLiteral("Control Core"))) {
+            config.controlCore = values;
+        }
+        if (trimmed.contains(QStringLiteral("Data Core"))) {
+            config.dataCore = values;
+        }
+    }
+
+    return result;
+}
+
+QVector<NpuProcessInfo> NpuInfoProvider::parseProcesses(const QString &output, const QString &cardId) const
+{
+    QVector<NpuProcessInfo> processes;
+    const QStringList lines = output.split('\n');
+
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+            continue;
+        }
+
+        const QStringList parts = trimmed.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        if (parts.size() >= 3) {
+            NpuProcessInfo info;
+            info.pid = parts.value(0);
+            info.processName = parts.value(1);
+            info.cardId = cardId;
+            if (parts.size() >= 4) {
+                info.chipId = parts.value(2);
+                info.memoryMb = parts.value(3);
+            } else if (parts.size() >= 3) {
+                info.memoryMb = parts.value(2);
+            }
+            processes.append(info);
+        }
+    }
+
+    return processes;
+}
+
+double NpuInfoProvider::parsePower(const QString &output, bool *ok) const
+{
+    if (ok) {
+        *ok = false;
+    }
+
+    const QStringList lines = output.split('\n');
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.contains(QStringLiteral("Power")) || trimmed.contains(QStringLiteral("power"))) {
+            const QRegularExpression re(QStringLiteral("([\\d.]+)\\s*[Ww]"));
+            const QRegularExpressionMatch match = re.match(trimmed);
+            if (match.hasMatch()) {
+                const double val = match.captured(1).toDouble(ok);
+                if (ok && *ok) {
+                    return val;
+                }
+            }
+        }
+    }
+
+    return 0.0;
+}
+
+double NpuInfoProvider::parseNumericValue(const QString &value, bool *ok) const
+{
+    if (ok) {
+        *ok = false;
+    }
+
+    QString cleaned = value.trimmed();
+    cleaned.remove(QStringLiteral("%"));
+    cleaned.remove(QStringLiteral("W"));
+    cleaned.remove(QStringLiteral("MB"));
+    cleaned.remove(QStringLiteral("KB"));
+    cleaned.remove(QStringLiteral("GB"));
+    cleaned.remove(QStringLiteral("C"));
+    cleaned.remove(QStringLiteral("°"));
+    cleaned = cleaned.trimmed();
+
+    return cleaned.toDouble(ok);
+}
+
+QStringList NpuInfoProvider::extractCardIds(const QVector<NpuCard> &cards, const QVector<NpuMappingEntry> &mappings) const
