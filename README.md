@@ -45,14 +45,45 @@ cmake --build build-rpm
 cpack --config build-rpm/CPackConfig.cmake -G RPM
 ```
 
-### 远程打包与验证
+生成的 RPM 位于 [build-rpm](build-rpm) 目录下（包名为 `ascend-monitor`）。
+
+### 远程打包与验证（10.40.125.244）
+
+已支持通过免密 SSH 在远程环境打包和验证：
 
 ```bash
 ./scripts/package_rpm_remote.sh
 ```
+
+可选参数：
+
+```bash
+./scripts/package_rpm_remote.sh <remote_host> <remote_dir> <local_output_dir>
+```
+
+示例：
+
+```bash
+./scripts/package_rpm_remote.sh 10.40.125.244 ~/ascend-monitor-rpm dist-rpm
+```
+
+脚本会执行以下步骤：
+
+- 同步项目到远程目录
+- 远程构建 Release
+- 远程执行 `cpack -G RPM`
+- 远程执行 `rpm -qpi` 与 `rpm -qpl` 做基本包校验
+- 将生成的 RPM 拉回本地输出目录（默认 [dist-rpm](dist-rpm)）
 
 ## 运行
 
 ```bash
 ./build/ascend-monitor
 ```
+
+## 使用说明
+
+- 工具栏支持本地/远程互斥模式，默认本地模式。
+- 远程模式下可输入 `User`、`Host`、`Password`，点击“连接”后开始远程采集与监控。
+- 远程功能仅在 Debug 构建中显示并可用；非 Debug 构建会隐藏远程相关控件。
+- 在已验证远程主机 `127.0.0.1` 上，可用 Card ID 是 `npu-smi info -l` 返回的 `NPU ID`（如 `3`、`4`、`5`、`6`）。
