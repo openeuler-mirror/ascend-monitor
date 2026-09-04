@@ -29,28 +29,24 @@
 #include <QLineSeries>
 #include <QValueAxis>
 
-static constexpr bool kRemoteFeatureEnabled =
-#ifdef ASCEND_MONITOR_ENABLE_REMOTE
-    true;
-#else
-    false;
-#endif
-
 namespace {
-
 QString displayValue(const QString &value)
 {
     return value.trimmed().isEmpty() ? QStringLiteral("-") : value.trimmed();
 }
 
+#ifdef ASCEND_MONITOR_ENABLE_REMOTE
+constexpr bool kRemoteFeatureEnabled = true;
+#else
+constexpr bool kRemoteFeatureEnabled = false;
+#endif
+
 QColor colorFromKey(const QString &key)
 {
-    uint hash = qHash(key);
-    int h = static_cast<int>(hash % 360);
-    return QColor::fromHsv(h, 180, 200);
+    const uint hash = qHash(key);
+    return QColor::fromHsv(hash % 360, 190, 220);
 }
-
-} // namespace
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)

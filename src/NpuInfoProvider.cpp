@@ -29,76 +29,164 @@ NpuScanResult NpuInfoProvider::scan() const
 {
     NpuScanResult result;
 
+    const CommandAttempt versionAttempt = runCommand({QStringLiteral("-v")});
+    result.attempts.append(versionAttempt);
+    if (versionAttempt.exitCode == 0 && !versionAttempt.stdOut.trimmed().isEmpty()) {
+        result.npuSmiVersion = parseNpuSmiVersion(versionAttempt.stdOut);
+    }
+
     const CommandAttempt listAttempt = runCommand({QStringLiteral("info"), QStringLiteral("-l")});
     result.attempts.append(listAttempt);
     result.rawListOutput = listAttempt.stdOut;
-
-    if (listAttempt.exitCode != 0 && result.rawListOutput.trimmed().isEmpty()) {
-        result.errorMessage = QStringLiteral("npu-smi info -l failed (exit %1): %2")
-                                  .arg(listAttempt.exitCode)
-                                  .arg(listAttempt.stdErr.trimmed());
-        return result;
-    }
-
-    result.cards = parseCardList(result.rawListOutput);
+    result.cards = parseCardList(listAttempt.stdOut);
 
     const CommandAttempt mappingAttempt = runCommand({QStringLiteral("info"), QStringLiteral("-m")});
     result.attempts.append(mappingAttempt);
     result.rawMappingOutput = mappingAttempt.stdOut;
+    result.mappings = parseMapping(mappingAttempt.stdOut);
 
-    if (mappingAttempt.exitCode == 0) {
-        result.mappings = parseMapping(result.rawMappingOutput);
-    }
+    for (const QString &cardId : extractCardIds(result.cards, result.mappings)) {
+        CommandAttempt boardAttempt = runCommand({
+            QStringLiteral("info"),
+            QStringLiteral("-t"),
+            QStringLiteral("board"),
+            QStringLiteral("-i"),
+            cardId
+        });
+        result.attempts.append(boardAttempt);
 
-    const CommandAttempt boardAttempt = runCommand({QStringLiteral("info"), QStringLiteral("-b")});
-    result.attempts.append(boardAttempt);
-    result.rawBoardOutput = boardAttempt.stdOut;
-
-    QString softwareVersion;
-    QString firmwareVersion;
-    parseBoardVersions(result.rawBoardOutput, &softwareVersion, &firmwareVersion);
-
-    for (NpuCard &card : result.cards) {
-        if (card.softwareVersion.trimmed().isEmpty()) {
-            card.softwareVersion = softwareVersion;
+        QString softwareVersion;
+        QString firmwareVersion;
+        if (boardAttempt.exitCode == 0 && !boardAttempt.stdOut.trimmed().isEmpty()) {
+            parseBoardVersions(boardAttempt.stdOut, &softwareVersion, &firmwareVersion);
         }
-        if (card.firmwareVersion.trimmed().isEmpty()) {
-            card.firmwareVersion = firmwareVersion;
+
+        if (softwareVersion.isEmpty() && firmwareVersion.isEmpty()) {
+            const CommandAttempt fallbackBoardAttempt = runCommand({
+                QStringLiteral("info"),
+                QStringLiteral("-i"),
+                cardId,
+                QStringLiteral("-t"),
+                QStringLiteral("board")
+            });
+            result.attempts.append(fallbackBoardAttempt);
+            if (fallbackBoardAttempt.exitCode == 0 && !fallbackBoardAttempt.stdOut.trimmed().isEmpty()) {
+                parseBoardVersions(fallbackBoardAttempt.stdOut, &softwareVersion, &firmwareVersion);
+            }
         }
-    }
 
-    const CommandAttempt healthAttempt = runCommand({QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("health")});
-    result.attempts.append(healthAttempt);
+        if (!softwareVersion.isEmpty() || !firmwareVersion.isEmpty()) {
+            for (NpuCard &card : result.cards) {
+                if (card.cardId != cardId) {
+                    continue;
+                }
+                if (!softwareVersion.isEmpty()) {
+                    card.softwareVersion = softwareVersion;
+                }
+                if (!firmwareVersion.isEmpty()) {
+                    card.firmwareVersion = firmwareVersion;
+                }
+            }
+        }
 
-    if (healthAttempt.exitCode == 0) {
-        const QMap<QString, QString> healthMap = parseHealthByChip(healthAttempt.stdOut);
-        for (NpuCard &card : result.cards) {
-            const QString chipKey = card.cardId.trimmed();
-            if (healthMap.contains(chipKey)) {
-                card.health = healthMap.value(chipKey);
+        const CommandAttempt memoryAttempt = runCommand({
+            QStringLiteral("info"),
+            QStringLiteral("-t"),
+            QStringLiteral("memory"),
+            QStringLiteral("-i"),
+            cardId
+        });
+        result.attempts.append(memoryAttempt);
+        if (memoryAttempt.exitCode == 0 && !memoryAttempt.stdOut.trimmed().isEmpty()) {
+            QString cardMemoryTotal;
+            const QMap<QString, QString> chipMemory = parseMemoryByChip(memoryAttempt.stdOut, &cardMemoryTotal);
+
+            for (NpuCard &card : result.cards) {
+                if (card.cardId == cardId) {
+                    card.memoryTotal = cardMemoryTotal;
+                    break;
+                }
+            }
+
+            for (NpuMappingEntry &mapping : result.mappings) {
+                if (mapping.cardId == cardId) {
+                    mapping.memoryTotal = chipMemory.value(mapping.chipId);
+                }
+            }
+        }
+
+        const CommandAttempt healthAttempt = runCommand({
+            QStringLiteral("info"),
+            QStringLiteral("-t"),
+            QStringLiteral("health"),
+            QStringLiteral("-i"),
+            cardId
+        });
+        result.attempts.append(healthAttempt);
+        if (healthAttempt.exitCode == 0 && !healthAttempt.stdOut.trimmed().isEmpty()) {
+            const QMap<QString, QString> healthByChip = parseHealthByChip(healthAttempt.stdOut);
+            QStringList values;
+            for (auto it = healthByChip.constBegin(); it != healthByChip.constEnd(); ++it) {
+                if (it.key().trimmed().compare(QStringLiteral("MCU"), Qt::CaseInsensitive) == 0) {
+                    continue;
+                }
+                values.append(it.value());
+            }
+            values.removeDuplicates();
+
+            QString health = QStringLiteral("-");
+            if (!values.isEmpty()) {
+                health = values.join(QStringLiteral("/"));
+            }
+
+            for (NpuCard &card : result.cards) {
+                if (card.cardId == cardId) {
+                    card.health = health;
+                    break;
+                }
+            }
+        }
+
+        const CommandAttempt cpuNumCfgAttempt = runCommand({
+            QStringLiteral("info"),
+            QStringLiteral("-t"),
+            QStringLiteral("cpu-num-cfg"),
+            QStringLiteral("-i"),
+            cardId
+        });
+        result.attempts.append(cpuNumCfgAttempt);
+        if (cpuNumCfgAttempt.exitCode == 0 && !cpuNumCfgAttempt.stdOut.trimmed().isEmpty()) {
+            const QMap<QString, CpuNumConfig> cpuCfgByChip = parseCpuNumCfgByChip(cpuNumCfgAttempt.stdOut);
+            for (NpuMappingEntry &mapping : result.mappings) {
+                if (mapping.cardId != cardId) {
+                    continue;
+                }
+                const CpuNumConfig cfg = cpuCfgByChip.value(mapping.chipId);
+                if (!cfg.aiCore.isEmpty()) {
+                    mapping.aiCore = cfg.aiCore;
+                }
+                if (!cfg.controlCore.isEmpty()) {
+                    mapping.controlCore = cfg.controlCore;
+                }
+                if (!cfg.dataCore.isEmpty()) {
+                    mapping.dataCore = cfg.dataCore;
+                }
             }
         }
     }
 
-    const CommandAttempt memoryAttempt = runCommand({QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("memory")});
-    result.attempts.append(memoryAttempt);
-
-    if (memoryAttempt.exitCode == 0) {
-        QString cardMemoryTotal;
-        const QMap<QString, QString> memoryMap = parseMemoryByChip(memoryAttempt.stdOut, &cardMemoryTotal);
-        for (NpuCard &card : result.cards) {
-            const QString chipKey = card.cardId.trimmed();
-            if (memoryMap.contains(chipKey)) {
-                card.memoryTotal = memoryMap.value(chipKey);
-            } else if (!cardMemoryTotal.isEmpty()) {
-                card.memoryTotal = cardMemoryTotal;
+    if (!result.hasData()) {
+        QStringList failures;
+        for (const CommandAttempt &attempt : result.attempts) {
+            if (attempt.exitCode != 0 && !attempt.stdErr.trimmed().isEmpty()) {
+                failures << QStringLiteral("%1: %2").arg(attempt.command, attempt.stdErr.trimmed());
             }
         }
-    }
 
-    const CommandAttempt versionAttempt = runCommand({QStringLiteral("-v")});
-    result.attempts.append(versionAttempt);
-    result.npuSmiVersion = parseNpuSmiVersion(versionAttempt.stdOut);
+        result.errorMessage = failures.isEmpty()
+            ? QStringLiteral("`npu-smi` returned no structured data.")
+            : QStringLiteral("Unable to collect NPU information. %1").arg(failures.join(QStringLiteral(" | ")));
+    }
 
     return result;
 }
@@ -108,77 +196,70 @@ NpuMonitorSnapshot NpuInfoProvider::collectMonitor(const QStringList &cardIds) c
     NpuMonitorSnapshot snapshot;
 
     for (const QString &cardId : cardIds) {
-        const QStringList tempArgs = {QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("temp"), QStringLiteral("-i"), cardId};
-        const CommandAttempt tempAttempt = runCommand(tempArgs);
+        const CommandAttempt tempAttempt = runCommand({
+            QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("temp"), QStringLiteral("-i"), cardId
+        });
+        if (tempAttempt.exitCode != 0) {
+            snapshot.errors.append(QStringLiteral("%1: %2").arg(tempAttempt.command, tempAttempt.stdErr.trimmed()));
+        }
 
-        if (tempAttempt.exitCode == 0) {
-            const QMap<QString, double> tempMap = parseTemperatureByChip(tempAttempt.stdOut);
-            for (auto it = tempMap.constBegin(); it != tempMap.constEnd(); ++it) {
-                NpuCoreMonitor monitor;
-                monitor.cardId = cardId;
-                monitor.chipId = it.key();
-                monitor.temperature = it.value();
+        const CommandAttempt usageAttempt = runCommand({
+            QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("usages"), QStringLiteral("-i"), cardId
+        });
+        if (usageAttempt.exitCode != 0) {
+            snapshot.errors.append(QStringLiteral("%1: %2").arg(usageAttempt.command, usageAttempt.stdErr.trimmed()));
+        }
+
+        const CommandAttempt powerAttempt = runCommand({
+            QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("power"), QStringLiteral("-i"), cardId
+        });
+        if (powerAttempt.exitCode != 0) {
+            snapshot.errors.append(QStringLiteral("%1: %2").arg(powerAttempt.command, powerAttempt.stdErr.trimmed()));
+        }
+
+        const QMap<QString, double> temperatureByChip = parseTemperatureByChip(tempAttempt.stdOut);
+        const QMap<QString, UsageMetrics> usageByChip = parseUsageByChip(usageAttempt.stdOut);
+
+        QSet<QString> chips;
+        for (const QString &chipId : temperatureByChip.keys()) {
+            chips.insert(chipId);
+        }
+        for (const QString &chipId : usageByChip.keys()) {
+            chips.insert(chipId);
+        }
+
+        for (const QString &chipId : chips) {
+            NpuCoreMonitor monitor;
+            monitor.cardId = cardId;
+            monitor.chipId = chipId;
+
+            if (temperatureByChip.contains(chipId)) {
+                monitor.temperature = temperatureByChip.value(chipId);
                 monitor.hasTemperature = true;
-                snapshot.coreMonitors.append(monitor);
             }
+
+            if (usageByChip.contains(chipId)) {
+                const UsageMetrics usage = usageByChip.value(chipId);
+                monitor.memoryUsageRate = usage.memoryUsageRate;
+                monitor.hasMemoryUsageRate = usage.hasMemoryUsageRate;
+                monitor.aicoreUsage = usage.aicoreUsage;
+                monitor.hasAicoreUsage = usage.hasAicoreUsage;
+                monitor.aivectorUsage = usage.aivectorUsage;
+                monitor.hasAivectorUsage = usage.hasAivectorUsage;
+                monitor.aicpuUsage = usage.aicpuUsage;
+                monitor.hasAicpuUsage = usage.hasAicpuUsage;
+            }
+
+            snapshot.coreMonitors.append(monitor);
         }
 
-        const QStringList usageArgs = {QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("usages"), QStringLiteral("-i"), cardId};
-        const CommandAttempt usageAttempt = runCommand(usageArgs);
-
-        if (usageAttempt.exitCode == 0) {
-            const QMap<QString, UsageMetrics> usageMap = parseUsageByChip(usageAttempt.stdOut);
-            for (auto it = usageMap.constBegin(); it != usageMap.constEnd(); ++it) {
-                NpuCoreMonitor *existing = nullptr;
-                for (NpuCoreMonitor &m : snapshot.coreMonitors) {
-                    if (m.cardId == cardId && m.chipId == it.key()) {
-                        existing = &m;
-                        break;
-                    }
-                }
-
-                if (existing == nullptr) {
-                    NpuCoreMonitor monitor;
-                    monitor.cardId = cardId;
-                    monitor.chipId = it.key();
-                    snapshot.coreMonitors.append(monitor);
-                    existing = &snapshot.coreMonitors.last();
-                }
-
-                const UsageMetrics &metrics = it.value();
-                if (metrics.hasMemoryUsageRate) {
-                    existing->memoryUsageRate = metrics.memoryUsageRate;
-                    existing->hasMemoryUsageRate = true;
-                }
-                if (metrics.hasAicoreUsage) {
-                    existing->aicoreUsage = metrics.aicoreUsage;
-                    existing->hasAicoreUsage = true;
-                }
-                if (metrics.hasAivectorUsage) {
-                    existing->aivectorUsage = metrics.aivectorUsage;
-                    existing->hasAivectorUsage = true;
-                }
-                if (metrics.hasAicpuUsage) {
-                    existing->aicpuUsage = metrics.aicpuUsage;
-                    existing->hasAicpuUsage = true;
-                }
-            }
-        }
-
-        const QStringList powerArgs = {QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("power"), QStringLiteral("-i"), cardId};
-        const CommandAttempt powerAttempt = runCommand(powerArgs);
-
-        if (powerAttempt.exitCode == 0) {
-            bool ok = false;
-            const double power = parsePower(powerAttempt.stdOut, &ok);
-            if (ok) {
-                NpuPowerMonitor powerMonitor;
-                powerMonitor.cardId = cardId;
-                powerMonitor.power = power;
-                powerMonitor.hasPower = true;
-                snapshot.powerMonitors.append(powerMonitor);
-            }
-        }
+        bool powerOk = false;
+        const double power = parsePower(powerAttempt.stdOut, &powerOk);
+        NpuPowerMonitor powerMonitor;
+        powerMonitor.cardId = cardId;
+        powerMonitor.power = power;
+        powerMonitor.hasPower = powerOk;
+        snapshot.powerMonitors.append(powerMonitor);
     }
 
     return snapshot;
@@ -186,303 +267,382 @@ NpuMonitorSnapshot NpuInfoProvider::collectMonitor(const QStringList &cardIds) c
 
 QVector<NpuProcessInfo> NpuInfoProvider::collectProcesses(const QString &cardId) const
 {
-    const QStringList args = {QStringLiteral("info"), QStringLiteral("-t"), QStringLiteral("proc")};
-    const CommandAttempt attempt = runCommand(args);
-
-    if (attempt.exitCode != 0) {
+    const CommandAttempt infoAttempt = runCommand({QStringLiteral("info")});
+    if (infoAttempt.exitCode != 0 || infoAttempt.stdOut.trimmed().isEmpty()) {
         return {};
     }
 
-    return parseProcesses(attempt.stdOut, cardId);
+    return parseProcesses(infoAttempt.stdOut, cardId);
 }
 
 QVector<NpuCard> NpuInfoProvider::parseCardList(const QString &output) const
 {
     QVector<NpuCard> cards;
+    if (output.trimmed().isEmpty()) {
+        return cards;
+    }
+
     const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
 
-    NpuCard currentCard;
-    bool inCard = false;
+    NpuCard current;
+    bool hasCurrent = false;
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
+    auto finalize = [&cards, &current, &hasCurrent]() {
+        if (!hasCurrent) {
+            return;
+        }
+        if (!current.cardId.isEmpty()) {
+            cards.append(current);
+        }
+        current = NpuCard();
+        hasCurrent = false;
+    };
 
-        if (trimmed.startsWith(QStringLiteral("NPU ID")) || trimmed.startsWith(QStringLiteral("Card ID"))) {
-            if (inCard && !currentCard.cardId.isEmpty()) {
-                cards.append(currentCard);
-                currentCard = NpuCard();
-            }
-            inCard = true;
+    for (const QString &rawLine : lines) {
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty() || looksLikeSeparator(line)) {
+            continue;
+        }
 
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0) {
-                currentCard.cardId = trimmed.mid(colonPos + 1).trimmed();
+        const QRegularExpressionMatch match = keyedPattern.match(line);
+        if (!match.hasMatch()) {
+            continue;
+        }
+
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
+
+        if (key == QStringLiteral("total count")) {
+            continue;
+        }
+
+        if (key == QStringLiteral("npu id")) {
+            if (!current.cardId.isEmpty() && current.cardId != value) {
+                finalize();
             }
-        } else if (inCard && trimmed.startsWith(QStringLiteral("Product Name"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0) {
-                currentCard.productName = trimmed.mid(colonPos + 1).trimmed();
-            }
-        } else if (inCard && trimmed.startsWith(QStringLiteral("Serial Number"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0) {
-                currentCard.serialNumber = trimmed.mid(colonPos + 1).trimmed();
-            }
-        } else if (inCard && trimmed.startsWith(QStringLiteral("Chip Count"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0) {
-                currentCard.chipCount = trimmed.mid(colonPos + 1).trimmed();
-            }
+            current.cardId = value;
+            hasCurrent = true;
+            continue;
+        }
+
+        if (!hasCurrent) {
+            continue;
+        }
+
+        if (key == QStringLiteral("product name")) {
+            current.productName = value;
+        } else if (key == QStringLiteral("serial number")) {
+            current.serialNumber = value;
+        } else if (key == QStringLiteral("chip count")) {
+            current.chipCount = value;
         }
     }
 
-    if (inCard && !currentCard.cardId.isEmpty()) {
-        cards.append(currentCard);
-    }
-
+    finalize();
     return cards;
 }
 
 QString NpuInfoProvider::parseNpuSmiVersion(const QString &output) const
 {
     const QStringList lines = output.split('\n');
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.contains(QStringLiteral("Version")) || trimmed.contains(QStringLiteral("version"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0) {
-                return trimmed.mid(colonPos + 1).trimmed();
-            }
+    const QRegularExpression versionPattern(
+        QStringLiteral("npu-smi\\s+version\\s*[:=]\\s*([0-9][0-9A-Za-z._-]*)"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    for (const QString &rawLine : lines) {
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+
+        const QRegularExpressionMatch match = versionPattern.match(line);
+        if (match.hasMatch()) {
+            return cleanValue(match.captured(1));
         }
     }
-    return output.trimmed();
+
+    return QString();
 }
 
 QVector<NpuMappingEntry> NpuInfoProvider::parseMapping(const QString &output) const
 {
-    QVector<NpuMappingEntry> entries;
-    const QStringList lines = output.split('\n');
+    QVector<NpuMappingEntry> mappings;
+    if (output.trimmed().isEmpty()) {
+        return mappings;
+    }
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+    const QStringList lines = output.split('\n');
+    const QRegularExpression rowPattern(QStringLiteral("^\\s*(\\d+)\\s+(\\d+)\\s+([0-9-]+)(?:\\s+(.+?))?\\s*$"));
+
+    for (int index = 0; index + 1 < lines.size(); ++index) {
+        const QString firstLine = lines.at(index).trimmed();
+        const QRegularExpressionMatch match = rowPattern.match(firstLine);
+        if (!match.hasMatch()) {
             continue;
         }
 
-        const QStringList parts = trimmed.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-        if (parts.size() >= 4) {
-            NpuMappingEntry entry;
-            entry.cardId = parts.value(0);
-            entry.chipId = parts.value(1);
-            entry.logicId = parts.value(2);
-            entry.chipName = parts.value(3);
-            if (parts.size() >= 5) entry.memoryTotal = parts.value(4);
-            if (parts.size() >= 6) entry.aiCore = parts.value(5);
-            if (parts.size() >= 7) entry.controlCore = parts.value(6);
-            if (parts.size() >= 8) entry.dataCore = parts.value(7);
-            entries.append(entry);
+        NpuMappingEntry entry;
+        entry.cardId = match.captured(1);
+        entry.chipId = match.captured(2);
+        entry.logicId = match.captured(3);
+        entry.chipName = cleanValue(match.captured(4));
+
+        if (entry.chipName.isEmpty() && index + 1 < lines.size()) {
+            const QString secondLine = lines.at(index + 1).trimmed();
+            if (!secondLine.isEmpty()) {
+                const QRegularExpressionMatch nextMatch = rowPattern.match(secondLine);
+                if (!nextMatch.hasMatch()) {
+                    entry.chipName = cleanValue(secondLine);
+                    ++index;
+                }
+            }
         }
+
+        if (entry.chipName.isEmpty()) {
+            entry.chipName = QStringLiteral("-");
+        }
+
+        mappings.append(entry);
     }
 
-    return entries;
+    return mappings;
 }
 
 void NpuInfoProvider::parseBoardVersions(
-    const QString &output, QString *softwareVersion, QString *firmwareVersion) const
+    const QString &output,
+    QString *softwareVersion,
+    QString *firmwareVersion) const
 {
+    if (softwareVersion != nullptr) {
+        softwareVersion->clear();
+    }
+    if (firmwareVersion != nullptr) {
+        firmwareVersion->clear();
+    }
+
     const QStringList lines = output.split('\n');
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.contains(QStringLiteral("Software Version")) || trimmed.contains(QStringLiteral("software version"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0 && softwareVersion) {
-                *softwareVersion = trimmed.mid(colonPos + 1).trimmed();
-            }
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
+
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
+            continue;
         }
-        if (trimmed.contains(QStringLiteral("Firmware Version")) || trimmed.contains(QStringLiteral("firmware version"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0 && firmwareVersion) {
-                *firmwareVersion = trimmed.mid(colonPos + 1).trimmed();
-            }
+
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
+
+        if (softwareVersion != nullptr && key == QStringLiteral("software version")) {
+            *softwareVersion = value;
+        } else if (firmwareVersion != nullptr && key == QStringLiteral("firmware version")) {
+            *firmwareVersion = value;
         }
     }
 }
 
 QMap<QString, QString> NpuInfoProvider::parseMemoryByChip(const QString &output, QString *cardMemoryTotal) const
 {
-    QMap<QString, QString> result;
-    const QStringList lines = output.split('\n');
+    QMap<QString, QString> chipMemory;
+    if (cardMemoryTotal != nullptr) {
+        cardMemoryTotal->clear();
+    }
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+    const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
+
+    QString pendingDdrCapacity;
+    qint64 cardTotal = 0;
+
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
             continue;
         }
 
-        if (trimmed.contains(QStringLiteral("Memory Total")) || trimmed.contains(QStringLiteral("Total Memory"))) {
-            const int colonPos = trimmed.indexOf(':');
-            if (colonPos >= 0 && cardMemoryTotal) {
-                *cardMemoryTotal = trimmed.mid(colonPos + 1).trimmed();
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
+
+        if (key == QStringLiteral("chip id")) {
+            if (pendingDdrCapacity.isEmpty()) {
+                continue;
             }
+
+            bool ok = false;
+            const qint64 memoryValue = pendingDdrCapacity.toLongLong(&ok);
+            if (ok) {
+                chipMemory.insert(value, QStringLiteral("%1 MB").arg(memoryValue));
+                cardTotal += memoryValue;
+            } else {
+                chipMemory.insert(value, pendingDdrCapacity);
+            }
+            pendingDdrCapacity.clear();
+            continue;
         }
 
-        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
-        const QRegularExpressionMatch match = re.match(trimmed);
-        if (match.hasMatch()) {
-            result[match.captured(1)] = match.captured(2).trimmed();
+        if (key == QStringLiteral("ddr capacity(mb)")) {
+            pendingDdrCapacity = value;
         }
     }
 
-    return result;
+    if (cardMemoryTotal != nullptr && cardTotal > 0) {
+        *cardMemoryTotal = QStringLiteral("%1 MB").arg(cardTotal);
+    }
+
+    return chipMemory;
 }
 
 QMap<QString, QString> NpuInfoProvider::parseHealthByChip(const QString &output) const
 {
-    QMap<QString, QString> result;
+    QMap<QString, QString> healthByChip;
     const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+    QString pendingHealth;
+    QString pendingChipName;
+
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
             continue;
         }
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
 
-        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
-        const QRegularExpressionMatch match = re.match(trimmed);
-        if (match.hasMatch()) {
-            result[match.captured(1)] = match.captured(2).trimmed();
+        if (key == QStringLiteral("health")) {
+            pendingHealth = value;
+        } else if (key == QStringLiteral("chip id")) {
+            if (!pendingHealth.isEmpty()) {
+                healthByChip.insert(value, pendingHealth);
+                pendingHealth.clear();
+            }
+        } else if (key == QStringLiteral("chip name")) {
+            pendingChipName = value;
+            if (!pendingHealth.isEmpty() && !pendingChipName.isEmpty()) {
+                healthByChip.insert(pendingChipName, pendingHealth);
+                pendingHealth.clear();
+                pendingChipName.clear();
+            }
         }
     }
 
-    return result;
+    return healthByChip;
 }
 
 QMap<QString, double> NpuInfoProvider::parseTemperatureByChip(const QString &output) const
 {
-    QMap<QString, double> result;
+    QMap<QString, double> temperatureByChip;
     const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+    QString pendingTemp;
+
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
             continue;
         }
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
 
-        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*([\\d.]+)"));
-        const QRegularExpressionMatch match = re.match(trimmed);
-        if (match.hasMatch()) {
+        if (key.startsWith(QStringLiteral("temperature"))) {
+            pendingTemp = value;
+        } else if (key == QStringLiteral("chip id")) {
             bool ok = false;
-            const double value = match.captured(2).toDouble(&ok);
+            const double temp = parseNumericValue(pendingTemp, &ok);
             if (ok) {
-                result[match.captured(1)] = value;
+                temperatureByChip.insert(value, temp);
             }
+            pendingTemp.clear();
         }
     }
 
-    return result;
+    return temperatureByChip;
 }
 
 QMap<QString, NpuInfoProvider::UsageMetrics> NpuInfoProvider::parseUsageByChip(const QString &output) const
 {
-    QMap<QString, UsageMetrics> result;
+    QMap<QString, UsageMetrics> usageByChip;
     const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()%.-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
-            continue;
-        }
+    UsageMetrics pending;
+    bool hasPending = false;
 
-        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
-        const QRegularExpressionMatch match = re.match(trimmed);
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
         if (!match.hasMatch()) {
             continue;
         }
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
 
-        const QString chipId = match.captured(1);
-        const QString values = match.captured(2).trimmed();
-
-        if (!result.contains(chipId)) {
-            result[chipId] = UsageMetrics();
-        }
-
-        UsageMetrics &metrics = result[chipId];
-
-        if (trimmed.contains(QStringLiteral("Memory Usage Rate")) || trimmed.contains(QStringLiteral("Memory Usage"))) {
-            bool ok = false;
-            const double val = parseNumericValue(values, &ok);
-            if (ok) {
-                metrics.memoryUsageRate = val;
-                metrics.hasMemoryUsageRate = true;
+        bool ok = false;
+        if (key == QStringLiteral("ddr usage rate(%)") || key == QStringLiteral("hbm usage rate(%)")) {
+            pending.memoryUsageRate = parseNumericValue(value, &ok);
+            pending.hasMemoryUsageRate = ok;
+            hasPending = hasPending || ok;
+        } else if (key == QStringLiteral("aicore usage rate(%)")) {
+            pending.aicoreUsage = parseNumericValue(value, &ok);
+            pending.hasAicoreUsage = ok;
+            hasPending = hasPending || ok;
+        } else if (key == QStringLiteral("vectorcore usage rate(%)") || key == QStringLiteral("aivector usage rate(%)")) {
+            pending.aivectorUsage = parseNumericValue(value, &ok);
+            pending.hasAivectorUsage = ok;
+            hasPending = hasPending || ok;
+        } else if (key == QStringLiteral("aicpu usage rate(%)")) {
+            pending.aicpuUsage = parseNumericValue(value, &ok);
+            pending.hasAicpuUsage = ok;
+            hasPending = hasPending || ok;
+        } else if (key == QStringLiteral("chip id")) {
+            if (hasPending) {
+                usageByChip.insert(value, pending);
             }
-        }
-        if (trimmed.contains(QStringLiteral("AICore"))) {
-            bool ok = false;
-            const double val = parseNumericValue(values, &ok);
-            if (ok) {
-                metrics.aicoreUsage = val;
-                metrics.hasAicoreUsage = true;
-            }
-        }
-        if (trimmed.contains(QStringLiteral("AIVector"))) {
-            bool ok = false;
-            const double val = parseNumericValue(values, &ok);
-            if (ok) {
-                metrics.aivectorUsage = val;
-                metrics.hasAivectorUsage = true;
-            }
-        }
-        if (trimmed.contains(QStringLiteral("AICPU"))) {
-            bool ok = false;
-            const double val = parseNumericValue(values, &ok);
-            if (ok) {
-                metrics.aicpuUsage = val;
-                metrics.hasAicpuUsage = true;
-            }
+            pending = UsageMetrics();
+            hasPending = false;
         }
     }
 
-    return result;
+    return usageByChip;
 }
 
 QMap<QString, NpuInfoProvider::CpuNumConfig> NpuInfoProvider::parseCpuNumCfgByChip(const QString &output) const
 {
-    QMap<QString, CpuNumConfig> result;
+    QMap<QString, CpuNumConfig> configByChip;
     const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()%.-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
 
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
-            continue;
-        }
+    CpuNumConfig pending;
+    bool hasPending = false;
 
-        const QRegularExpression re(QStringLiteral("(\\d+)\\s*:\\s*(.+)"));
-        const QRegularExpressionMatch match = re.match(trimmed);
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
         if (!match.hasMatch()) {
             continue;
         }
 
-        const QString chipId = match.captured(1);
-        const QString values = match.captured(2).trimmed();
+        const QString key = match.captured(1).trimmed().toLower();
+        const QString value = cleanValue(match.captured(2));
 
-        if (!result.contains(chipId)) {
-            result[chipId] = CpuNumConfig();
-        }
-
-        CpuNumConfig &config = result[chipId];
-
-        if (trimmed.contains(QStringLiteral("AI Core"))) {
-            config.aiCore = values;
-        }
-        if (trimmed.contains(QStringLiteral("Control Core"))) {
-            config.controlCore = values;
-        }
-        if (trimmed.contains(QStringLiteral("Data Core"))) {
-            config.dataCore = values;
+        if (key == QStringLiteral("current ai cpu number")) {
+            pending.aiCore = value;
+            hasPending = true;
+        } else if (key == QStringLiteral("current control cpu number")) {
+            pending.controlCore = value;
+            hasPending = true;
+        } else if (key == QStringLiteral("current data cpu number")) {
+            pending.dataCore = value;
+            hasPending = true;
+        } else if (key == QStringLiteral("chip id")) {
+            if (hasPending) {
+                configByChip.insert(value, pending);
+            }
+            pending = CpuNumConfig();
+            hasPending = false;
         }
     }
 
-    return result;
+    return configByChip;
 }
 
 QVector<NpuProcessInfo> NpuInfoProvider::parseProcesses(const QString &output, const QString &cardId) const
@@ -490,26 +650,41 @@ QVector<NpuProcessInfo> NpuInfoProvider::parseProcesses(const QString &output, c
     QVector<NpuProcessInfo> processes;
     const QStringList lines = output.split('\n');
 
+    const QRegularExpression rowPattern(
+        QStringLiteral("^\\|\\s*(\\d+)\\s+(\\d+)\\s*\\|\\s*(\\d+)\\s*\\|\\s*(.*?)\\s*\\|\\s*(\\S+)\\s*\\|"));
+
+    bool inProcessSection = false;
     for (const QString &line : lines) {
         const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || looksLikeSeparator(trimmed)) {
+        if (trimmed.contains(QStringLiteral("Process id"), Qt::CaseInsensitive)) {
+            inProcessSection = true;
             continue;
         }
 
-        const QStringList parts = trimmed.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-        if (parts.size() >= 3) {
-            NpuProcessInfo info;
-            info.pid = parts.value(0);
-            info.processName = parts.value(1);
-            info.cardId = cardId;
-            if (parts.size() >= 4) {
-                info.chipId = parts.value(2);
-                info.memoryMb = parts.value(3);
-            } else if (parts.size() >= 3) {
-                info.memoryMb = parts.value(2);
-            }
-            processes.append(info);
+        if (!inProcessSection) {
+            continue;
         }
+
+        if (trimmed.contains(QStringLiteral("No running processes found in NPU"), Qt::CaseInsensitive)) {
+            continue;
+        }
+
+        const QRegularExpressionMatch match = rowPattern.match(trimmed);
+        if (!match.hasMatch()) {
+            continue;
+        }
+
+        NpuProcessInfo process;
+        process.cardId = match.captured(1).trimmed();
+        process.chipId = match.captured(2).trimmed();
+        process.pid = match.captured(3).trimmed();
+        process.processName = cleanValue(match.captured(4));
+        process.memoryMb = match.captured(5).trimmed();
+
+        if (!cardId.trimmed().isEmpty() && process.cardId != cardId.trimmed()) {
+            continue;
+        }
+        processes.append(process);
     }
 
     return processes;
@@ -517,110 +692,157 @@ QVector<NpuProcessInfo> NpuInfoProvider::parseProcesses(const QString &output, c
 
 double NpuInfoProvider::parsePower(const QString &output, bool *ok) const
 {
-    if (ok) {
+    const QStringList lines = output.split('\n');
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*([A-Za-z][A-Za-z0-9_ /()%.-]+?)\\s*[:=]\\s*(.+?)\\s*$"));
+
+    for (const QString &rawLine : lines) {
+        const QRegularExpressionMatch match = keyedPattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
+            continue;
+        }
+        const QString key = match.captured(1).trimmed().toLower();
+        if (!key.startsWith(QStringLiteral("power dissipation")) && !key.startsWith(QStringLiteral("power"))) {
+            continue;
+        }
+        return parseNumericValue(cleanValue(match.captured(2)), ok);
+    }
+
+    if (ok != nullptr) {
         *ok = false;
     }
-
-    const QStringList lines = output.split('\n');
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.contains(QStringLiteral("Power")) || trimmed.contains(QStringLiteral("power"))) {
-            const QRegularExpression re(QStringLiteral("([\\d.]+)\\s*[Ww]"));
-            const QRegularExpressionMatch match = re.match(trimmed);
-            if (match.hasMatch()) {
-                const double val = match.captured(1).toDouble(ok);
-                if (ok && *ok) {
-                    return val;
-                }
-            }
-        }
-    }
-
     return 0.0;
 }
 
 double NpuInfoProvider::parseNumericValue(const QString &value, bool *ok) const
 {
-    if (ok) {
-        *ok = false;
+    const QRegularExpression numberPattern(QStringLiteral("([-+]?[0-9]*\\.?[0-9]+)"));
+    const QRegularExpressionMatch match = numberPattern.match(value);
+    if (!match.hasMatch()) {
+        if (ok != nullptr) {
+            *ok = false;
+        }
+        return 0.0;
     }
 
-    QString cleaned = value.trimmed();
-    cleaned.remove(QStringLiteral("%"));
-    cleaned.remove(QStringLiteral("W"));
-    cleaned.remove(QStringLiteral("MB"));
-    cleaned.remove(QStringLiteral("KB"));
-    cleaned.remove(QStringLiteral("GB"));
-    cleaned.remove(QStringLiteral("C"));
-    cleaned.remove(QStringLiteral("°"));
-    cleaned = cleaned.trimmed();
-
-    return cleaned.toDouble(ok);
+    bool localOk = false;
+    const double parsed = match.captured(1).toDouble(&localOk);
+    if (ok != nullptr) {
+        *ok = localOk;
+    }
+    return localOk ? parsed : 0.0;
 }
 
 QStringList NpuInfoProvider::extractCardIds(const QVector<NpuCard> &cards, const QVector<NpuMappingEntry> &mappings) const
 {
-    QStringList ids;
+    QStringList cardIds;
+    QSet<QString> seen;
 
     for (const NpuCard &card : cards) {
-        const QString id = card.cardId.trimmed();
-        if (!id.isEmpty() && !ids.contains(id)) {
-            ids.append(id);
+        if (!card.cardId.isEmpty() && !seen.contains(card.cardId)) {
+            seen.insert(card.cardId);
+            cardIds.append(card.cardId);
         }
     }
 
     for (const NpuMappingEntry &mapping : mappings) {
-        const QString id = mapping.cardId.trimmed();
-        if (!id.isEmpty() && !ids.contains(id)) {
-            ids.append(id);
+        if (!mapping.cardId.isEmpty() && !seen.contains(mapping.cardId)) {
+            seen.insert(mapping.cardId);
+            cardIds.append(mapping.cardId);
         }
     }
 
-    return ids;
+    std::sort(cardIds.begin(), cardIds.end(), [](const QString &left, const QString &right) {
+        return left.toInt() < right.toInt();
+    });
+    return cardIds;
 }
 
 CommandAttempt NpuInfoProvider::runCommand(const QStringList &arguments) const
 {
     CommandAttempt attempt;
-    attempt.command = arguments.join(QStringLiteral(" "));
+    const QString baseCommand = QStringLiteral("npu-smi %1").arg(arguments.join(' '));
+    attempt.command = baseCommand;
+
+#ifndef ACEND_MONITOR_ENABLE_REMOTE
+    if (m_connectionOptions.useSsh) {
+        attempt.exitCode = -1;
+        attempt.stdErr = QStringLiteral("Remote mode is available only in Debug builds.");
+        return attempt;
+    }
+#endif
+
+    QProcess process;
+    QString program = QStringLiteral("npu-smi");
+    QStringList processArguments = arguments;
 
     if (m_connectionOptions.useSsh) {
-        const QString remoteCmd = QStringLiteral("npu-smi %1").arg(arguments.join(QStringLiteral(" ")));
-        const QString sshCmd = QStringLiteral("sshpass -p '%1' ssh -o StrictHostKeyChecking=no -p %2 %3@%4 %5")
-                                   .arg(m_connectionOptions.password)
-                                   .arg(m_connectionOptions.port)
-                                   .arg(m_connectionOptions.user)
-                                   .arg(m_connectionOptions.host)
-                                   .arg(remoteCmd);
-
-        QProcess process;
-        process.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), sshCmd});
-        process.waitForFinished(30000);
-
-        attempt.exitCode = process.exitCode();
-        attempt.stdOut = QString::fromUtf8(process.readAllStandardOutput());
-        attempt.stdErr = QString::fromUtf8(process.readAllStandardError());
-    } else {
-        const QString npuSmiPath = QStandardPaths::findExecutable(QStringLiteral("npu-smi"));
-        if (npuSmiPath.isEmpty()) {
+        if (m_connectionOptions.host.trimmed().isEmpty()) {
             attempt.exitCode = -1;
-            attempt.stdErr = QStringLiteral("npu-smi not found in PATH");
+            attempt.stdErr = QStringLiteral("SSH host is empty.");
             return attempt;
         }
 
-        QProcess process;
-        process.start(npuSmiPath, arguments);
-        process.waitForFinished(30000);
+        program = QStringLiteral("ssh");
+        processArguments.clear();
+        if (m_connectionOptions.port > 0 && m_connectionOptions.port != 22) {
+            processArguments << QStringLiteral("-p") << QString::number(m_connectionOptions.port);
+        }
 
-        attempt.exitCode = process.exitCode();
-        attempt.stdOut = QString::fromUtf8(process.readAllStandardOutput());
-        attempt.stdErr = QString::fromUtf8(process.readAllStandardError());
+        const QString destination = m_connectionOptions.user.trimmed().isEmpty()
+            ? m_connectionOptions.host.trimmed()
+            : QStringLiteral("%1@%2").arg(m_connectionOptions.user.trimmed(), m_connectionOptions.host.trimmed());
+        QStringList sshArguments;
+        if (m_connectionOptions.port > 0 && m_connectionOptions.port != 22) {
+            sshArguments << QStringLiteral("-p") << QString::number(m_connectionOptions.port);
+        }
+        sshArguments << destination << QStringLiteral("npu-smi") << arguments;
+
+        if (!m_connectionOptions.password.isEmpty()) {
+            const QString sshpassPath = QStandardPaths::findExecutable(QStringLiteral("sshpass"));
+            if (sshpassPath.isEmpty()) {
+                attempt.exitCode = -1;
+                attempt.stdErr = QStringLiteral("Password mode requires sshpass. Install sshpass or use SSH key-based login.");
+                return attempt;
+            }
+            program = sshpassPath;
+            processArguments.clear();
+            processArguments << QStringLiteral("-p") << m_connectionOptions.password << QStringLiteral("ssh") << sshArguments;
+        } else {
+            processArguments = sshArguments;
+        }
+
+        attempt.command = QStringLiteral("ssh %1 %2").arg(destination, baseCommand);
     }
 
+    process.start(program, processArguments);
+
+    if (!process.waitForStarted(3000)) {
+        attempt.exitCode = -1;
+        attempt.stdErr = m_connectionOptions.useSsh
+            ? QStringLiteral("Failed to start ssh. Ensure ssh is installed and reachable.")
+            : QStringLiteral("Failed to start npu-smi. Ensure it is installed and in PATH.");
+        return attempt;
+    }
+
+    if (!process.waitForFinished(8000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        attempt.exitCode = -1;
+        attempt.stdErr = QStringLiteral("Command timed out.");
+        return attempt;
+    }
+
+    attempt.exitCode = process.exitCode();
+    attempt.stdOut = QString::fromLocal8Bit(process.readAllStandardOutput());
+    attempt.stdErr = QString::fromLocal8Bit(process.readAllStandardError());
     return attempt;
 }
 
 QString NpuInfoProvider::cleanValue(QString value) const
 {
+    value = value.trimmed();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith('\'') && value.endsWith('\''))) {
+        value = value.mid(1, value.size() - 2);
+    }
     return value.trimmed();
 }
