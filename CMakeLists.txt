@@ -57,41 +57,43 @@ enable_testing()
 
 file(GLOB NPU_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
 
-if(NPU_TEST_SOURCES)
+foreach(NPU_TEST_SOURCE ${NPU_TEST_SOURCES})
+    get_filename_component(NPU_TEST_NAME ${NPU_TEST_SOURCE} NAME_WE)
+
     if(QT_VERSION_MAJOR GREATER_EQUAL 6)
-        qt_add_executable(npu-provider-tests
-            ${NPU_TEST_SOURCES}
+        qt_add_executable(${NPU_TEST_NAME}
+            ${NPU_TEST_SOURCE}
             src/NpuInfoProvider.cpp
             include/NpuInfoProvider.h
             include/NpuTypes.h
         )
     else()
-        add_executable(npu-provider-tests
-            ${NPU_TEST_SOURCES}
+        add_executable(${NPU_TEST_NAME}
+            ${NPU_TEST_SOURCE}
             src/NpuInfoProvider.cpp
             include/NpuInfoProvider.h
             include/NpuTypes.h
         )
     endif()
 
-    target_include_directories(npu-provider-tests
+    target_include_directories(${NPU_TEST_NAME}
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
-    target_link_libraries(npu-provider-tests
+    target_link_libraries(${NPU_TEST_NAME}
         PRIVATE
             Qt${QT_VERSION_MAJOR}::Core
             Qt${QT_VERSION_MAJOR}::Test
     )
 
     if(WIN32)
-        target_compile_definitions(npu-provider-tests PRIVATE UNICODE _UNICODE)
+        target_compile_definitions(${NPU_TEST_NAME} PRIVATE UNICODE _UNICODE)
     endif()
 
-    add_test(NAME npu-provider-tests COMMAND npu-provider-tests)
-    set_tests_properties(npu-provider-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-endif()
+    add_test(NAME ${NPU_TEST_NAME} COMMAND ${NPU_TEST_NAME})
+    set_tests_properties(${NPU_TEST_NAME} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endforeach()
 
 install(TARGETS ascend-monitor
     RUNTIME DESTINATION bin
