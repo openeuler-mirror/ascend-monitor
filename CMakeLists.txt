@@ -8,8 +8,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Charts Concurrent)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Charts Concurrent)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Charts Concurrent Test)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Charts Concurrent Test)
 
 set(NPU_CONTROL_SOURCES
     src/main.cpp
@@ -44,14 +44,54 @@ target_include_directories(ascend-monitor
 target_link_libraries(ascend-monitor
     PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets
-    Qt${QT_VERSION_MAJOR}::Charts
-    Qt${QT_VERSION_MAJOR}::Concurrent
+        Qt${QT_VERSION_MAJOR}::Charts
+        Qt${QT_VERSION_MAJOR}::Concurrent
 )
 
 target_compile_definitions(ascend-monitor
     PRIVATE
         $<$<CONFIG:Debug>:ASCEND_MONITOR_ENABLE_REMOTE>
 )
+
+enable_testing()
+
+file(GLOB NPU_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+
+if(NPU_TEST_SOURCES)
+    if(QT_VERSION_MAJOR GREATER_EQUAL 6)
+        qt_add_executable(npu-provider-tests
+            ${NPU_TEST_SOURCES}
+            src/NpuInfoProvider.cpp
+            include/NpuInfoProvider.h
+            include/NpuTypes.h
+        )
+    else()
+        add_executable(npu-provider-tests
+            ${NPU_TEST_SOURCES}
+            src/NpuInfoProvider.cpp
+            include/NpuInfoProvider.h
+            include/NpuTypes.h
+        )
+    endif()
+
+    target_include_directories(npu-provider-tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(npu-provider-tests
+        PRIVATE
+            Qt${QT_VERSION_MAJOR}::Core
+            Qt${QT_VERSION_MAJOR}::Test
+    )
+
+    if(WIN32)
+        target_compile_definitions(npu-provider-tests PRIVATE UNICODE _UNICODE)
+    endif()
+
+    add_test(NAME npu-provider-tests COMMAND npu-provider-tests)
+    set_tests_properties(npu-provider-tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 
 install(TARGETS ascend-monitor
     RUNTIME DESTINATION bin
