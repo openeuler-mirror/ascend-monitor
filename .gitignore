@@ -1,0 +1,16 @@
+/build/
+/.cache/
+/.idea/
+/.vscode/*.db
+/.vscode/*.log
+*.user
+*.autosave
+*.o
+*.obj
+*.so
+*.a
+*.dll
+*.exe
+*.app
+*.pro.user
+compile_commands.json
