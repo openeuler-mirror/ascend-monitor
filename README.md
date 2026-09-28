@@ -87,3 +87,5 @@ cpack --config build-rpm/CPackConfig.cmake -G RPM
 - 远程模式下可输入 `User`、`Host`、`Password`，点击“连接”后开始远程采集与监控。
 - 远程功能仅在 Debug 构建中显示并可用；非 Debug 构建会隐藏远程相关控件。
 - 在已验证远程主机 `127.0.0.1` 上，可用 Card ID 是 `npu-smi info -l` 返回的 `NPU ID`（如 `3`、`4`、`5`、`6`）。
+
+<!-- atomgit-points: daily update 2026-09-28 -->
