@@ -18,6 +18,15 @@
 #include <QTimer>
 #include <QValueAxis>
 
+// Qt 5 Charts uses its own namespace; Qt 6 places these types in Qt.
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+using QtCharts::QChart;
+using QtCharts::QChartView;
+using QtCharts::QDateTimeAxis;
+using QtCharts::QLineSeries;
+using QtCharts::QValueAxis;
+#endif
+
 QT_BEGIN_NAMESPACE
 class QWidget;
 QT_END_NAMESPACE
