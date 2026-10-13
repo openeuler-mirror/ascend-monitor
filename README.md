@@ -4,7 +4,7 @@
 
 ## 终端监控：ascend-monitor-tui
 
-同仓库新增独立 C++ TUI `ascend-monitor-tui`，提供每芯片设备与进度条、主机及 NPU 历史曲线、完整设备进程表。可单独构建和打 RPM，无需 Qt 或 Python，详见 [构建、指标和使用说明](docs/ascend-monitor-tui.md) 与 [验证记录](docs/ascend-monitor-tui-validation.md)。
+同仓库新增独立 C++ TUI `ascend-monitor-tui`，提供每芯片设备与进度条、主机及 NPU 历史曲线、完整设备进程表。可单独构建和打 RPM，无需 Qt 或 Python，详见 [构建、指标和使用说明](docs/ascend-monitor-tui.md)。
 
 ## 功能特性
 
