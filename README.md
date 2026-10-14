@@ -2,6 +2,10 @@
 
 `ascend-monitor` 是一个基于 Qt 的桌面图形工具，用于查看 Ascend NPU 卡信息、Card/Chip 到逻辑 NPU 的映射关系、实时监控指标，以及宿主机上的 NPU 进程信息。
 
+## 终端监控：ascend-monitor-tui
+
+同仓库新增独立 C++ TUI `ascend-monitor-tui`，提供每芯片设备与进度条、主机及 NPU 历史曲线、完整设备进程表。可单独构建和打 RPM，无需 Qt 或 Python，详见 [构建、指标和使用说明](docs/ascend-monitor-tui.md)。
+
 ## 功能特性
 
 - 卡列表：来自 `npu-smi info -l`
@@ -26,6 +30,7 @@
 - CMake 3.16 及以上
 - Qt 5 Widgets 或 Qt 6 Widgets 开发包
 - Qt Charts（例如 `qt6-qtcharts`）
+- 同时构建 TUI 时需要 ncurses 开发包和 Ascend DCMI 头文件；仅构建 GUI 可设置 `-DASCEND_MONITOR_BUILD_TUI=OFF`
 - `npu-smi` 命令可在 `PATH` 中访问
 
 ## 编译
@@ -45,7 +50,7 @@ cmake --build build-rpm
 cpack --config build-rpm/CPackConfig.cmake -G RPM
 ```
 
-生成的 RPM 位于 [build-rpm](build-rpm) 目录下（包名为 `ascend-monitor`）。
+生成的 RPM 位于 [build-rpm](build-rpm) 目录下（GUI 包名为 `ascend-monitor`，启用 TUI 时另生成 `ascend-monitor-tui`）。
 
 ### 远程打包与验证（10.40.125.244）
 
@@ -77,8 +82,16 @@ cpack --config build-rpm/CPackConfig.cmake -G RPM
 
 ## 运行
 
+GUI：
+
 ```bash
 ./build/ascend-monitor
+```
+
+TUI：
+
+```bash
+./build/ascend-monitor-tui
 ```
 
 ## 使用说明

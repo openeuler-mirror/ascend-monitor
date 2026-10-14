@@ -14,3 +14,10 @@
 *.app
 *.pro.user
 compile_commands.json
+
+/build-top/
+/build-all/
+/build-tui/
+/build-rpm/
+/dist-rpm/
+__pycache__/
