@@ -111,6 +111,8 @@ def run(binary, output):
         assert 'ascend-monitor-tui 0.1.0' in initial and 'ascend-top' not in initial, initial
         assert 'Driver: 25.5.1' in initial and 'CANN: 8.5.2' in initial, initial
         assert initial.count('310P3') == 8, initial
+        assert len(re.findall(r'Share (?:On|Off|N/A)', initial)) == 8, initial
+        assert len(re.findall(r'Logic \d+', initial)) == 8, initial
         assert 'NPU MEM:' in initial and 'NPU UTL:' in initial and 'VLLM' in initial, initial
         assert 'root@' in initial and 'N/A' in initial, initial
         assert any('\u2800' <= c <= '\u28ff' for c in initial) and '*' not in initial, initial
@@ -125,12 +127,16 @@ def run(binary, output):
         assert medium.count('310P3') == 8, medium
         assert all('MEM:' in row and row.count('│') == 5 for row in medium.splitlines() if '310P3' in row), medium
         assert '43.24GiB' in medium and 'Card 6 / Chip 0' in medium, medium
+        assert len(re.findall(r'Share (?:On|Off|N/A)', medium)) == 8, medium
         if output: Path(output, 'screen-medium.txt').write_text(medium)
         send(b'h')
         assert 'one logical CPU = 100%' in screen.text(), screen.text()
+        assert 'container sharing enabled' in screen.text(), screen.text()
         send(b'h')
         size(24, 90); screen = Screen(24, 90); process.send_signal(signal.SIGWINCH); drain(1)
         assert 'NPU MEM:' in screen.text() and 'Processes:' in screen.text(), screen.text()
+        assert re.search(r'\d+/\d+  Share (?:On|Off|N/A)', screen.text()), screen.text()
+        assert re.search(r'Logic \d+', screen.text()) and 'MEM:' in screen.text(), screen.text()
         send(b'\t\x1bOF')  # device focus and End, application cursor mode
         assert '7    310P3' in screen.text(), screen.text()
         send(b'\t\x1bOF\x1bOC')

@@ -20,6 +20,7 @@ struct Device {
     std::optional<unsigned> physical, logical;
     std::string name = "N/A", pci = "N/A";
     Value temperature, power, core;
+    std::optional<bool> deviceShare;
     Memory memory;
     bool processesAvailable = false;
 };
