@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <dlfcn.h>
 #ifdef ASCEND_MONITOR_TUI_HAVE_DCMI
@@ -41,7 +42,26 @@ struct Dcmi::Impl {
     DCMI_FN(dcmi_get_device_pcie_info_v2); DCMI_FN(dcmi_get_device_temperature);
     DCMI_FN(dcmi_get_device_power_info); DCMI_FN(dcmi_get_device_utilization_rate);
     DCMI_FN(dcmi_get_device_memory_info_v3); DCMI_FN(dcmi_get_device_resource_info);
+    DCMI_FN(dcmi_get_device_share_enable);
 #undef DCMI_FN
+    struct ShareReading {
+        std::optional<bool> enabled;
+        Clock::time_point refreshAfter{};
+    };
+    std::map<std::pair<int, int>, ShareReading> shareReadings;
+    std::optional<bool> deviceShare(int card, int chip) {
+        if (!dcmi_get_device_share_enable_) return std::nullopt;
+        auto& reading = shareReadings[{card, chip}];
+        if (Clock::now() >= reading.refreshAfter) {
+            int flag = -1;
+            int rc = dcmi_get_device_share_enable_(card, chip, &flag);
+            reading.enabled.reset();
+            if (rc == 0 && (flag == 0 || flag == 1)) reading.enabled = flag == 1;
+            // Cache failures too; a failed refresh must not retain an old On/Off value.
+            reading.refreshAfter = Clock::now() + std::chrono::seconds(5);
+        }
+        return reading.enabled;
+    }
     Impl() {
         for (const char* path : {"/usr/local/Ascend/driver/lib64/driver/libdcmi.so", "libdcmi.so"}) {
             library = dlopen(path, RTLD_NOW | RTLD_LOCAL); if (library) break;
@@ -54,6 +74,7 @@ struct Dcmi::Impl {
         LOAD(dcmi_get_device_pcie_info_v2); LOAD(dcmi_get_device_temperature);
         LOAD(dcmi_get_device_power_info); LOAD(dcmi_get_device_utilization_rate);
         LOAD(dcmi_get_device_memory_info_v3); LOAD(dcmi_get_device_resource_info);
+        LOAD(dcmi_get_device_share_enable);
 #undef LOAD
         if (!dcmi_init_ || !dcmi_get_card_list_ || !dcmi_get_device_num_in_card_) { error = "DCMI required entry points unavailable"; return; }
         int rc = dcmi_init_(); if (rc != 0) { error = "dcmi_init failed: " + std::to_string(rc); return; }
@@ -70,6 +91,7 @@ struct Dcmi::Impl {
             if (rc || chips < 0 || chips > 128) { s.error = "Incomplete device enumeration, card " + std::to_string(cards[i]); continue; }
             for (int chip = 0; chip < chips; ++chip) {
                 Device d; d.card = cards[i]; d.chip = chip;
+                d.deviceShare = deviceShare(d.card, chip);
                 int logical = -1;
                 if (dcmi_get_device_logic_id_ && dcmi_get_device_logic_id_(&logical, d.card, chip) == 0 && logical >= 0) {
                     d.logical = static_cast<unsigned>(logical); unsigned physical = 0;
@@ -105,6 +127,12 @@ struct Dcmi::Impl {
                 }
                 s.devices.push_back(std::move(d));
             }
+        }
+        for (auto it = shareReadings.begin(); it != shareReadings.end();) {
+            bool present = std::any_of(s.devices.begin(), s.devices.end(), [&](const Device& d) {
+                return it->first == std::make_pair(d.card, d.chip);
+            });
+            if (!present) it = shareReadings.erase(it); else ++it;
         }
         auto key = [](const auto& d) { return std::make_tuple(d.physical.value_or(~0u), d.card, d.chip); };
         std::sort(s.devices.begin(), s.devices.end(), [&](const Device& a, const Device& b) { return key(a) < key(b); });

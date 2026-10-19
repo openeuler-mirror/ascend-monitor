@@ -129,6 +129,8 @@ static void help() {
         "PageUp/PageDown   Scroll a page        Home/End   First/last row",
         "Left/Right   Pan process command      Resize   Reflow without losing history", "",
         "NPU = physical device ID. Card/Chip identify the driver endpoint.",
+        "Logic ID may differ from NPU. Share = container sharing enabled: On / Off / N/A.",
+        "Share refreshes every 5s; N/A means unavailable, unsupported or query failed.",
         "DDR/HBM label describes capacity, never memory bandwidth.",
         "Power is CHIP power (W). Unsupported readings stay N/A; card MCU power is not substituted.",
         "NPU MEM = sum(used) / sum(total) of readable chips. CORE = mean of readable chips.",
@@ -172,7 +174,8 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     }
 
     // Two lines per device, including on the side-by-side 120-column layout.
-    const std::vector<int> columns{left, 21, 46, 65, right};
+    const bool shortDeviceLabel = COLS < 100;
+    const std::vector<int> columns{left, 21, 46, shortDeviceLabel ? 65 : 75, right};
     auto cell = [&](int y, size_t col, const std::string& value, int color = 0) {
         text(y, columns[col] + 2, value, color, columns[col + 1] - columns[col] - 3);
     };
@@ -189,7 +192,7 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     if (!compact) cell(5, 0, "Temp      Power");
     cell(4, 1, "Bus-Id / Memory type");
     if (!compact) cell(5, 1, "Memory used / total");
-    cell(4, 2, "Card / Chip");
+    cell(4, 2, shortDeviceLabel ? "Card/Chip Share" : "Card / Chip / Share");
     if (!compact) cell(5, 2, "Core / Logic ID");
     cell(4, 3, "Memory / AI Core");
     for (int x : columns) vertical(4, x, compact ? 1 : 2);
@@ -207,7 +210,11 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
         cell(y + 1, 0, fit(number(d.temperature, 0, "C"), 10) + number(d.power, 1, "W"), color);
         cell(y, 1, d.pci + " " + d.memory.kind, color);
         cell(y + 1, 1, bytes(d.memory.used) + " / " + bytes(d.memory.total), color);
-        cell(y, 2, "Card " + std::to_string(d.card) + " / Chip " + std::to_string(d.chip), color);
+        const std::string endpoint = shortDeviceLabel
+            ? std::to_string(d.card) + "/" + std::to_string(d.chip)
+            : "Card " + std::to_string(d.card) + " / Chip " + std::to_string(d.chip);
+        const std::string share = d.deviceShare ? (*d.deviceShare ? "On" : "Off") : "N/A";
+        cell(y, 2, endpoint + "  Share " + share, color);
         cell(y + 1, 2, number(d.core, 0, "%") + "  Logic " + deviceId(d.logical), color);
         bar(y, columns[3] + 2, right - columns[3] - 3, "MEM:", d.memory.percent());
         bar(y + 1, columns[3] + 2, right - columns[3] - 3, "UTL:", d.core);
@@ -221,7 +228,7 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
         tableRule(y + 2, {left, right}); y += 3;
     }
 
-    const int split = std::min(columns[3], COLS - 38);
+    const int split = std::min(65, COLS - 38);
     const int hostX = left + 2, hostWidth = split - hostX - 1;
     const int npuX = split + 2, npuWidth = right - npuX - 1;
     const std::vector<int> panels{left, split, right};

@@ -30,7 +30,7 @@
 - CMake 3.16 及以上
 - Qt 5 Widgets 或 Qt 6 Widgets 开发包
 - Qt Charts（例如 `qt6-qtcharts`）
-- 同时构建 TUI 时需要 ncurses 开发包和 Ascend DCMI 头文件；仅构建 GUI 可设置 `-DASCEND_MONITOR_BUILD_TUI=OFF`
+- 同时构建 TUI 时需要 `ncurses-devel` 和 Ascend DCMI 头文件；仅构建 GUI 可设置 `-DASCEND_MONITOR_BUILD_TUI=OFF`
 - `npu-smi` 命令可在 `PATH` 中访问
 
 ## 编译

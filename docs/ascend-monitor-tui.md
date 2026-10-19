@@ -4,7 +4,7 @@
 
 ## 构建和运行
 
-目标环境需要 C++17、CMake 3.16+、ncursesw（宽字符版 ncurses）开发包，以及驱动自带的 `dcmi_interface_api.h`。
+源码构建需要支持 C++17 的编译器、CMake 3.16+、`ncurses-devel` 开发包，以及驱动自带的 `dcmi_interface_api.h`。
 
 ```sh
 cmake -S . -B build-top \
@@ -52,6 +52,7 @@ ascend-monitor-tui --help
 ## 指标口径
 
 - **NPU**：物理 NPU ID，按此排序；另外展示逻辑 ID 和 Card/Chip，映射失败不会拿其他编号代替。
+- **Share**：指定芯片的容器共享使能状态，使用 `dcmi_get_device_share_enable` 查询；`On` 表示启用，`Off` 表示禁用，接口缺失、不支持、查询失败或返回异常值时为 `N/A`。它表示功能开关，不表示当前有多少容器共享。首次采集读取，之后每芯片每 5 秒刷新，期间复用缓存；失败后清除旧值并按同样周期重试。JSON 字段 `device_share` 为 `true` / `false` / `null`。主表保留 Logic ID，Card/Chip 后显示 Share；不足 100 列时 Card/Chip 缩写为 `3/0`，保留完整状态。
 - **内存**：本版验证的是 310P3 DDR，容量单位为 MiB/GiB；DCMI 的 MiB 转为字节，已用为总量减可用量。容量占用与内存带宽利用率是不同指标。HBM 型号尚未适配，不将 DDR 当作 HBM。
 - **功耗**：仅芯片功耗，DCMI 的 0.1 W 转为 W。目标机此接口不支持，因此为 `N/A`；不会重复显示整卡 MCU 功耗充当芯片功耗。
 - **NPU 汇总内存**：可读芯片已用容量之和 / 总容量之和；**汇总 AI Core**：可读芯片利用率的算术平均。两者均显示可读芯片数 / 总芯片数。
@@ -65,7 +66,7 @@ ascend-monitor-tui --help
 
 ```sh
 (cd build-top && cpack -G RPM)
-sudo rpm -Uvh build-top/ascend-monitor-tui-0.1.0-8.aarch64.rpm
+sudo rpm -Uvh build-top/ascend-monitor-tui-0.1.0-9.aarch64.rpm
 ascend-monitor-tui
 ```
 

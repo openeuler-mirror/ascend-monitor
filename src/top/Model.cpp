@@ -105,6 +105,7 @@ std::string snapshotJson(const Snapshot& s) {
         o << "{\"physical_id\":" << id(d.physical) << ",\"logical_id\":" << id(d.logical) << ",\"card\":" << d.card << ",\"chip\":" << d.chip
           << ",\"name\":" << quote(d.name) << ",\"pci\":" << quote(d.pci) << ",\"temperature_c\":" << jsonValue(d.temperature)
           << ",\"chip_power_w\":" << jsonValue(d.power) << ",\"core_percent\":" << jsonValue(d.core)
+          << ",\"device_share\":" << (d.deviceShare ? (*d.deviceShare ? "true" : "false") : "null")
           << ",\"memory_kind\":" << quote(d.memory.kind) << ",\"memory_used_bytes\":" << jsonValue(d.memory.used)
           << ",\"memory_total_bytes\":" << jsonValue(d.memory.total) << ",\"processes_available\":" << (d.processesAvailable ? "true" : "false") << '}';
     }
