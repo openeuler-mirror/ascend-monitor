@@ -1,10 +1,12 @@
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QButtonGroup>
 #include <QColor>
 #include <QDateTime>
 #include <QDateTimeAxis>
+#include <QDialog>
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
@@ -12,15 +14,21 @@
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QFont>
+#include <QMouseEvent>
+#include <QMenu>
 #include <QPen>
 #include <QPixmap>
 #include <QRadioButton>
+#include <QSettings>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyle>
+#include <QToolButton>
 #include <QFutureWatcher>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QWindow>
 #include <QtConcurrent>
 
 #include <QChart>
@@ -51,15 +59,29 @@ QColor colorFromKey(const QString &key)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+
+    QSettings settings;
+    m_chartRefreshSeconds = qBound(1, settings.value(QStringLiteral("refresh/chartSeconds"), 1).toInt(), 3600);
+    m_deviceInfoRefreshSeconds = qBound(
+        1,
+        settings.value(QStringLiteral("refresh/deviceInfoSeconds"), 5).toInt(),
+        3600);
+
     setupUi();
     qApp->installEventFilter(this);
 
     m_monitorTimer = new QTimer(this);
-    m_monitorTimer->setInterval(1000);
+    m_monitorTimer->setInterval(m_chartRefreshSeconds * 1000);
     connect(m_monitorTimer, &QTimer::timeout, this, &MainWindow::updateMonitorCharts);
+
+    m_deviceInfoTimer = new QTimer(this);
+    m_deviceInfoTimer->setInterval(m_deviceInfoRefreshSeconds * 1000);
+    connect(m_deviceInfoTimer, &QTimer::timeout, this, &MainWindow::refreshData);
 
     refreshData();
     m_monitorTimer->start();
+    m_deviceInfoTimer->start();
 }
 
 void MainWindow::setupUi()
@@ -67,6 +89,8 @@ void MainWindow::setupUi()
     setWindowTitle(QStringLiteral("ascend-monitor"));
     resize(1500, 920);
     setMinimumSize(1100, 700);
+    setupSettingsMenu();
+    setupTitleBar();
 
     auto *centralWidget = new QWidget(this);
     auto *rootLayout = new QVBoxLayout(centralWidget);
@@ -223,6 +247,223 @@ void MainWindow::setupUi()
     windowStatusBar->addPermanentWidget(m_updatedLabel);
 }
 
+void MainWindow::setupTitleBar()
+{
+    m_titleBar = new QWidget(this);
+    m_titleBar->setObjectName(QStringLiteral("titleBar"));
+    m_titleBar->setFixedHeight(36);
+    m_titleBar->setStyleSheet(
+        QStringLiteral(
+            "QWidget#titleBar { background: palette(window); border-bottom: 1px solid #d1d5db; }"
+            "QToolButton { border: none; border-radius: 0; }"
+            "QToolButton:hover { background: #e5e7eb; }"
+            "QToolButton#mainMenuButton::menu-indicator { image: none; }"
+            "QToolButton#closeButton:hover { background: #dc2626; }"));
+
+    auto *titleLayout = new QHBoxLayout(m_titleBar);
+    titleLayout->setContentsMargins(8, 0, 0, 0);
+    titleLayout->setSpacing(0);
+
+    auto *titleLabel = new QLabel(QStringLiteral("ascend-monitor"), m_titleBar);
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch(1);
+    titleLayout->addWidget(m_menuButton);
+
+    auto *minimizeButton = new QToolButton(m_titleBar);
+    minimizeButton->setToolTip(QStringLiteral("最小化"));
+    minimizeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarMinButton));
+
+    auto *maximizeButton = new QToolButton(m_titleBar);
+    maximizeButton->setToolTip(QStringLiteral("最大化"));
+    maximizeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarMaxButton));
+
+    auto *closeButton = new QToolButton(m_titleBar);
+    closeButton->setObjectName(QStringLiteral("closeButton"));
+    closeButton->setToolTip(QStringLiteral("关闭"));
+    closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+
+    for (QToolButton *button : {minimizeButton, maximizeButton, closeButton}) {
+        button->setAutoRaise(true);
+        button->setFixedSize(36, 36);
+        titleLayout->addWidget(button);
+    }
+
+    connect(minimizeButton, &QToolButton::clicked, this, &QWidget::showMinimized);
+    connect(maximizeButton, &QToolButton::clicked, this, [this]() {
+        isMaximized() ? showNormal() : showMaximized();
+    });
+    connect(closeButton, &QToolButton::clicked, this, &QWidget::close);
+
+    setMenuWidget(m_titleBar);
+}
+
+void MainWindow::setupSettingsMenu()
+{
+    m_menuButton = new QToolButton(this);
+    m_menuButton->setObjectName(QStringLiteral("mainMenuButton"));
+    m_menuButton->setAutoRaise(true);
+    m_menuButton->setPopupMode(QToolButton::InstantPopup);
+    m_menuButton->setToolTip(QStringLiteral("菜单"));
+    m_menuButton->setFixedSize(36, 36);
+    m_menuButton->setIcon(
+        QIcon::fromTheme(
+            QStringLiteral("open-menu-symbolic"),
+            style()->standardIcon(QStyle::SP_TitleBarMenuButton)));
+
+    auto *mainMenu = new QMenu(m_menuButton);
+    QAction *configurationAction = mainMenu->addAction(QStringLiteral("配置"));
+
+    auto *softwareInfoMenu = mainMenu->addMenu(QStringLiteral("软件信息"));
+    QAction *applicationNameAction = softwareInfoMenu->addAction(
+        QStringLiteral("软件名称：ascend-monitor"));
+    QAction *applicationVersionAction = softwareInfoMenu->addAction(
+        QStringLiteral("软件版本：0.1.0"));
+    applicationNameAction->setEnabled(false);
+    applicationVersionAction->setEnabled(false);
+    m_menuButton->setMenu(mainMenu);
+
+    connect(configurationAction, &QAction::triggered, this, &MainWindow::showConfigurationDialog);
+}
+
+void MainWindow::showConfigurationDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("配置"));
+    dialog.setMinimumWidth(440);
+    dialog.setStyleSheet(
+        QStringLiteral(
+            "QFrame#configurationCard {"
+            "  background: palette(base);"
+            "  border: 1px solid #d1d5db;"
+            "  border-radius: 10px;"
+            "}"
+            "QToolButton#intervalButton {"
+            "  border: none;"
+            "  border-radius: 16px;"
+            "  background: #e5e7eb;"
+            "  font-size: 18px;"
+            "}"
+            "QToolButton#intervalButton:hover { background: #d1d5db; }"));
+
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    dialogLayout->setContentsMargins(20, 20, 20, 16);
+    dialogLayout->setSpacing(12);
+
+    auto *sectionTitle = new QLabel(QStringLiteral("系统配置"), &dialog);
+    QFont sectionFont = sectionTitle->font();
+    sectionFont.setBold(true);
+    sectionTitle->setFont(sectionFont);
+    dialogLayout->addWidget(sectionTitle);
+
+    auto *configurationCard = new QFrame(&dialog);
+    configurationCard->setObjectName(QStringLiteral("configurationCard"));
+    auto *configurationLayout = new QVBoxLayout(configurationCard);
+    configurationLayout->setContentsMargins(14, 4, 14, 4);
+    configurationLayout->setSpacing(0);
+
+    int chartRefreshSeconds = m_chartRefreshSeconds;
+    int deviceInfoRefreshSeconds = m_deviceInfoRefreshSeconds;
+
+    const auto addIntervalRow = [configurationCard, configurationLayout](
+                                    const QString &title,
+                                    int *intervalSeconds) {
+        auto *row = new QWidget(configurationCard);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 8, 0, 8);
+        rowLayout->setSpacing(8);
+
+        auto *label = new QLabel(title, row);
+        auto *decreaseButton = new QToolButton(row);
+        decreaseButton->setObjectName(QStringLiteral("intervalButton"));
+        decreaseButton->setText(QStringLiteral("-"));
+        decreaseButton->setFixedSize(32, 32);
+
+        auto *valueLabel = new QLabel(row);
+        valueLabel->setAlignment(Qt::AlignCenter);
+        valueLabel->setMinimumWidth(54);
+
+        auto *increaseButton = new QToolButton(row);
+        increaseButton->setObjectName(QStringLiteral("intervalButton"));
+        increaseButton->setText(QStringLiteral("+"));
+        increaseButton->setFixedSize(32, 32);
+
+        const auto refreshValue = [valueLabel, intervalSeconds]() {
+            valueLabel->setText(QStringLiteral("%1 秒").arg(*intervalSeconds));
+        };
+        refreshValue();
+
+        connect(decreaseButton, &QToolButton::clicked, row, [intervalSeconds, refreshValue]() {
+            *intervalSeconds = qMax(1, *intervalSeconds - 1);
+            refreshValue();
+        });
+        connect(increaseButton, &QToolButton::clicked, row, [intervalSeconds, refreshValue]() {
+            *intervalSeconds = qMin(3600, *intervalSeconds + 1);
+            refreshValue();
+        });
+
+        rowLayout->addWidget(label);
+        rowLayout->addStretch(1);
+        rowLayout->addWidget(decreaseButton);
+        rowLayout->addWidget(valueLabel);
+        rowLayout->addWidget(increaseButton);
+        configurationLayout->addWidget(row);
+    };
+
+    addIntervalRow(
+        QStringLiteral("图表刷新时间"),
+        &chartRefreshSeconds);
+
+    auto *separator = new QFrame(configurationCard);
+    separator->setFrameShape(QFrame::HLine);
+    separator->setStyleSheet(QStringLiteral("color: #e5e7eb;"));
+    configurationLayout->addWidget(separator);
+
+    addIntervalRow(
+        QStringLiteral("状态刷新时间"),
+        &deviceInfoRefreshSeconds);
+
+    dialogLayout->addWidget(configurationCard);
+
+    auto *buttonLayout = new QHBoxLayout();
+    buttonLayout->addStretch(1);
+    auto *saveButton = new QPushButton(QStringLiteral("保存"), &dialog);
+    auto *exitButton = new QPushButton(QStringLiteral("退出"), &dialog);
+    connect(saveButton, &QPushButton::clicked, &dialog, [this, &dialog, &chartRefreshSeconds, &deviceInfoRefreshSeconds]() {
+        setChartRefreshInterval(chartRefreshSeconds);
+        setDeviceInfoRefreshInterval(deviceInfoRefreshSeconds);
+        dialog.accept();
+    });
+    connect(exitButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+    buttonLayout->addWidget(saveButton);
+    buttonLayout->addWidget(exitButton);
+    dialogLayout->addLayout(buttonLayout);
+
+    dialog.exec();
+}
+
+void MainWindow::setChartRefreshInterval(int intervalSeconds)
+{
+    m_chartRefreshSeconds = qBound(1, intervalSeconds, 3600);
+    if (m_monitorTimer != nullptr) {
+        m_monitorTimer->setInterval(m_chartRefreshSeconds * 1000);
+    }
+    QSettings().setValue(QStringLiteral("refresh/chartSeconds"), m_chartRefreshSeconds);
+}
+
+void MainWindow::setDeviceInfoRefreshInterval(int intervalSeconds)
+{
+    m_deviceInfoRefreshSeconds = qBound(1, intervalSeconds, 3600);
+    if (m_deviceInfoTimer != nullptr) {
+        m_deviceInfoTimer->setInterval(m_deviceInfoRefreshSeconds * 1000);
+    }
+    QSettings().setValue(QStringLiteral("refresh/deviceInfoSeconds"), m_deviceInfoRefreshSeconds);
+}
+
+int MainWindow::chartHistoryDurationSeconds() const
+{
+    return (m_maxSamples - 1) * m_chartRefreshSeconds;
+}
+
 void MainWindow::setupProcessPanel()
 {
     m_processPage = new QWidget(this);
@@ -375,7 +616,7 @@ void MainWindow::setupChart(
     (*axisX)->setTickCount(4);
     (*axisX)->setLabelsAngle(-35);
     const QDateTime now = QDateTime::currentDateTime();
-    (*axisX)->setRange(now.addSecs(-(m_maxSamples - 1)), now);
+    (*axisX)->setRange(now.addSecs(-chartHistoryDurationSeconds()), now);
 
     *axisY = new QValueAxis();
     (*axisY)->setTitleText(yAxisLabel);
@@ -641,7 +882,7 @@ void MainWindow::updateMonitorCharts()
         }
 
         const QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(nowMs);
-        const QDateTime minTime = maxTime.addSecs(-(m_maxSamples - 1));
+        const QDateTime minTime = maxTime.addSecs(-chartHistoryDurationSeconds());
         m_tempAxisX->setRange(minTime, maxTime);
         m_memoryAxisX->setRange(minTime, maxTime);
         m_powerAxisX->setRange(minTime, maxTime);
@@ -705,13 +946,15 @@ void MainWindow::updateProcessPanel()
 
         if (showAllCards) {
             m_processSummaryLabel->setText(
-                QStringLiteral("All Cards | Processes: %1 | Refresh: 1s")
-                    .arg(processes.size()));
+                QStringLiteral("All Cards | Processes: %1 | Refresh: %2s")
+                    .arg(processes.size())
+                    .arg(m_chartRefreshSeconds));
         } else {
             m_processSummaryLabel->setText(
-                QStringLiteral("Card %1 | Processes: %2 | Refresh: 1s")
+                QStringLiteral("Card %1 | Processes: %2 | Refresh: %3s")
                     .arg(cardId)
-                    .arg(processes.size()));
+                    .arg(processes.size())
+                    .arg(m_chartRefreshSeconds));
         }
     });
 
@@ -836,6 +1079,83 @@ void MainWindow::resetMonitorSeries()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::MouseButtonPress
+        && !isMaximized()
+        && windowHandle() != nullptr) {
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            const QPoint globalPosition = mouseEvent->globalPosition().toPoint();
+#else
+            const QPoint globalPosition = mouseEvent->globalPos();
+#endif
+            const QRect frame = frameGeometry();
+            constexpr int resizeMargin = 6;
+            Qt::Edges edges;
+            if (globalPosition.x() <= frame.left() + resizeMargin) {
+                edges |= Qt::LeftEdge;
+            } else if (globalPosition.x() >= frame.right() - resizeMargin) {
+                edges |= Qt::RightEdge;
+            }
+            if (globalPosition.y() <= frame.top() + resizeMargin) {
+                edges |= Qt::TopEdge;
+            } else if (globalPosition.y() >= frame.bottom() - resizeMargin) {
+                edges |= Qt::BottomEdge;
+            }
+            if (edges != Qt::Edges() && windowHandle()->startSystemResize(edges)) {
+                return true;
+            }
+        }
+    }
+
+    const auto *titleBarWidget = qobject_cast<const QWidget *>(watched);
+    const bool isTitleBarEvent =
+        titleBarWidget != nullptr
+        && m_titleBar != nullptr
+        && (titleBarWidget == m_titleBar || m_titleBar->isAncestorOf(titleBarWidget))
+        && qobject_cast<const QToolButton *>(watched) == nullptr;
+
+    if (isTitleBarEvent) {
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        const auto globalPosition = [mouseEvent]() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            return mouseEvent->globalPosition().toPoint();
+#else
+            return mouseEvent->globalPos();
+#endif
+        };
+
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+            if (mouseEvent->button() == Qt::LeftButton) {
+                m_draggingTitleBar = true;
+                m_titleBarDragOffset = globalPosition() - frameGeometry().topLeft();
+                return true;
+            }
+            break;
+        case QEvent::MouseMove:
+            if (m_draggingTitleBar && (mouseEvent->buttons() & Qt::LeftButton)) {
+                move(globalPosition() - m_titleBarDragOffset);
+                return true;
+            }
+            break;
+        case QEvent::MouseButtonRelease:
+            if (mouseEvent->button() == Qt::LeftButton) {
+                m_draggingTitleBar = false;
+                return true;
+            }
+            break;
+        case QEvent::MouseButtonDblClick:
+            if (mouseEvent->button() == Qt::LeftButton) {
+                isMaximized() ? showNormal() : showMaximized();
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
     if (event->type() == QEvent::MouseButtonPress) {
         QWidget *clickedWidget = qobject_cast<QWidget *>(watched);
 
