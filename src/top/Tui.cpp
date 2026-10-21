@@ -3,6 +3,7 @@
 #endif
 #include "top/Tui.h"
 #include "top/Graph.h"
+#include "top/ProcessTable.h"
 #include <clocale>
 #include <cwchar>
 #include <langinfo.h>
@@ -128,6 +129,10 @@ static void help() {
         "Up/Down, j/k   Scroll focused list      Tab   Switch device/process focus",
         "PageUp/PageDown   Scroll a page        Home/End   First/last row",
         "Left/Right   Pan process command      Resize   Reflow without losing history", "",
+        "Click NPU-MEM / %MEM / %CPU header to sort; click again to reverse.",
+        "s / S   Cycle NPU memory, host memory, CPU (descending)     /   Reverse sort",
+        "Triangle: down = descending, up = ascending (ASCII: v / ^). Missing values last.",
+        "Process sorting is global; each chip's process memory stays a separate row.", "",
         "NPU = physical device ID. Card/Chip identify the driver endpoint.",
         "Logic ID may differ from NPU. Share = container sharing enabled: On / Off / N/A.",
         "Share refreshes every 5s; N/A means unavailable, unsupported or query failed.",
@@ -159,7 +164,8 @@ static void tableRule(int y, const std::vector<int>& columns, bool top = false, 
         mvaddch(y, columns[i], lineGlyph(joint));
     }
 }
-static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double interval) {
+static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double interval,
+                 const ProcessSort& sort, ProcessHeader& processHeader) {
     erase();
     const int left = 1, right = COLS - 2;
     auto now = Clock::now();
@@ -266,16 +272,31 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
 
     const int processTop = y;
     tableRule(y++, {left, right}, true);
-    text(y, left + 2, std::string(!deviceFocus ? "> " : "") + "Processes:" + (compact && s.host.root ? " [root]" : ""));
+    text(y, left + 2, std::string(!deviceFocus ? "> " : "") + "Processes:" + (compact && s.host.root ? " [root]" : "")
+        + "  [click header / s: sort]");
     auto identity = s.host.user + "@" + s.host.hostname;
     text(y++, std::max(left + 18, right - static_cast<int>(identity.size()) - 1), identity, 1, right - left - 20);
-    text(y++, left + 2, fit("NPU", 5) + fit("PID", 9) + fit("USER", 10) + fit("NPU-MEM", 12)
+    processHeader = {y, left + 2, right - left - 3};
+    text(y, left + 2, fit("NPU", 5) + fit("PID", 9) + fit("USER", 10) + fit("NPU-MEM", 12)
         + fit("%CPU", 7) + fit("%MEM", 7) + fit("TIME", 10) + "COMMAND", 0, right - left - 3);
+    for (const auto& c : processSortColumns) if (c.field == sort.field) {
+        const int x = processHeader.x + c.offset;
+        attrset(A_REVERSE | A_BOLD);
+        mvaddnstr(y, x, fit(c.label, c.width).c_str(), c.width);
+        wchar_t marker = sort.descending ? L'\u25bc' : L'\u25b2';
+        if (asciiGraphics || wcwidth(marker) != 1) marker = sort.descending ? L'v' : L'^';
+        wchar_t chars[] = {marker, 0}; cchar_t symbol{};
+        if (setcchar(&symbol, chars, A_REVERSE | A_BOLD, 0, nullptr) != ERR)
+            mvadd_wch(y, x + std::char_traits<char>::length(c.label), &symbol);
+        attrset(A_NORMAL);
+    }
+    ++y;
     tableRule(y++, {left, right});
     int rows = std::max(0, LINES - y - 2);
-    processOffset = std::clamp(processOffset, 0, std::max(0, static_cast<int>(s.processes.size()) - rows));
-    for (int i = processOffset; i < std::min(processOffset + rows, static_cast<int>(s.processes.size())); ++i) {
-        const auto& p = s.processes[i];
+    auto processes = sortedProcesses(s, sort);
+    processOffset = std::clamp(processOffset, 0, std::max(0, static_cast<int>(processes.size()) - rows));
+    for (int i = processOffset; i < std::min(processOffset + rows, static_cast<int>(processes.size())); ++i) {
+        const auto& p = *processes[i];
         auto command = p.command.size() > static_cast<size_t>(pan) ? p.command.substr(pan) : "";
         text(y++, left + 2, fit(deviceId(p.physical), 5) + fit(std::to_string(p.pid), 9) + fit(p.user, 10)
             + fit(bytes(p.npuBytes), 12) + fit(number(p.cpu), 7) + fit(number(p.memoryPercent), 7)
@@ -299,15 +320,29 @@ int runTui(double interval, bool ascii) {
     struct Terminal { Terminal() { initscr(); cbreak(); noecho(); keypad(stdscr, TRUE); curs_set(0); timeout(100); if (has_colors()) {
         start_color(); use_default_colors(); init_pair(1, COLOR_GREEN, -1); init_pair(2, COLOR_YELLOW, -1); init_pair(3, COLOR_RED, -1);
         init_pair(4, COLOR_CYAN, -1); init_pair(5, COLOR_MAGENTA, -1); init_pair(6, COLOR_BLUE, -1);
-    }} ~Terminal() { endwin(); } } terminal;
+    } mousemask(BUTTON1_CLICKED, nullptr); mouseinterval(150);
+    } ~Terminal() { mousemask(0, nullptr); endwin(); } } terminal;
     interrupted = 0; auto oldInt = std::signal(SIGINT, stopSignal); auto oldTerm = std::signal(SIGTERM, stopSignal);
     {
         Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0; bool deviceFocus = false, showHelp = false;
+        ProcessSort sort; ProcessHeader processHeader;
         while (!interrupted) {
+            processHeader = {};
             auto s = sampler.latest();
-            if (showHelp) help(); else if (s) draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval);
+            if (showHelp) help(); else if (s) draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval, sort, processHeader);
             else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
             refresh(); int key = getch(); int& offset = deviceFocus ? deviceOffset : processOffset;
+            if (!showHelp && key == KEY_MOUSE) {
+                MEVENT event{};
+                if (getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED)) {
+                    auto field = processHeader.hit(event.y, event.x);
+                    if (field) { sort.select(*field); processOffset = 0; deviceFocus = false; }
+                }
+            }
+            if (!showHelp && (key == 's' || key == 'S' || key == '/')) {
+                if (key == '/') sort.descending = !sort.descending; else sort.next();
+                processOffset = 0;
+            }
             if (key == 'q' || (key == 27 && !showHelp)) break;
             if (key == 'h' || key == '?' || (key == 27 && showHelp)) showHelp = !showHelp;
             if (key == '\t') deviceFocus = !deviceFocus;

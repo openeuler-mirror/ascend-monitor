@@ -21,7 +21,8 @@ int main(int argc, char** argv) {
                 "  --interval   History/JSON interval, 0.2 to 60 seconds (default 1)\n"
                 "  --ascii      Use ASCII graphics instead of Unicode Braille\n"
                 "  --version    Show version\n"
-                "Keys: h help, q quit, Tab focus, arrows/PageUp/PageDown scroll.\n"; return 0;
+                "Keys: h help, q quit, Tab focus, arrows/PageUp/PageDown scroll.\n"
+                "Sort: click NPU-MEM/%MEM/%CPU headers, s cycle field, / reverse.\n"; return 0;
         }
         if (arg == "--version") { std::cout << "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "\n"; return 0; }
         if (arg == "--ascii") { ascii = true; continue; }

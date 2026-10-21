@@ -25,6 +25,13 @@ class Screen:
         self.acs = False
         self.last = ' '
         self.decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        self.scroll_top, self.scroll_bottom = 0, rows - 1
+
+    def scroll(self, top, bottom, count, down=False):
+        count = min(count, bottom - top + 1)
+        blank = [[' '] * self.cols for _ in range(count)]
+        region = self.cells[top:bottom + 1]
+        self.cells[top:bottom + 1] = blank + region[:len(region) - count] if down else region[count:] + blank
 
     def put(self, char):
         if self.acs:
@@ -67,15 +74,27 @@ class Screen:
                     elif op == 'X': self.cells[self.y][self.x:self.x + n] = [' '] * min(n, self.cols - self.x)
                     elif op == 'b':
                         for _ in range(n): self.put(self.last)
+                    elif op == 'r':
+                        self.scroll_top = max(0, args[0] - 1)
+                        self.scroll_bottom = min(self.rows - 1, (args[1] if len(args) > 1 and args[1] else self.rows) - 1)
+                        self.y = self.x = 0
+                    elif op in ('S', 'T'):
+                        self.scroll(self.scroll_top, self.scroll_bottom, n, down=op == 'T')
+                    elif op in ('L', 'M') and self.scroll_top <= self.y <= self.scroll_bottom:
+                        self.scroll(self.y, self.scroll_bottom, n, down=op == 'L')
                     i += m.end(); continue
                 if s[i + 1] in '()':
                     if i + 2 >= len(s): break
                     if s[i + 1] == '(': self.acs = s[i + 2] == '0'
                     i += 3; continue
-                if s[i + 1] == 'M': self.y = max(0, self.y - 1)
+                if s[i + 1] == 'M':
+                    if self.y == self.scroll_top: self.scroll(self.scroll_top, self.scroll_bottom, 1, down=True)
+                    else: self.y = max(0, self.y - 1)
                 i += 2; continue
             if c == '\r': self.x = 0
-            elif c == '\n': self.y = min(self.rows - 1, self.y + 1)
+            elif c == '\n':
+                if self.y == self.scroll_bottom: self.scroll(self.scroll_top, self.scroll_bottom, 1)
+                else: self.y = min(self.rows - 1, self.y + 1)
             elif c == '\b': self.x = max(0, self.x - 1)
             elif c == '\t': self.x = min(self.cols - 1, (self.x // 8 + 1) * 8)
             elif c >= ' ': self.put(c)
