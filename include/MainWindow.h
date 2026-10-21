@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QLineSeries>
 #include <QMainWindow>
+#include <QPoint>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStackedWidget>
@@ -28,6 +29,7 @@ using QtCharts::QValueAxis;
 #endif
 
 QT_BEGIN_NAMESPACE
+class QToolButton;
 class QWidget;
 QT_END_NAMESPACE
 
@@ -51,8 +53,14 @@ private slots:
 
 private:
     void setupUi();
+    void setupTitleBar();
+    void setupSettingsMenu();
     void setupMonitorPanel();
     void setupProcessPanel();
+    void showConfigurationDialog();
+    void setChartRefreshInterval(int intervalSeconds);
+    void setDeviceInfoRefreshInterval(int intervalSeconds);
+    int chartHistoryDurationSeconds() const;
     NpuConnectionOptions currentConnectionOptions() const;
     void resetMonitorSeries();
     void setupChart(
@@ -105,8 +113,13 @@ private:
     QLabel *m_passwordLabel = nullptr;
     QLineEdit *m_passwordEdit = nullptr;
     QPushButton *m_remoteConnectButton = nullptr;
+    QWidget *m_titleBar = nullptr;
+    QToolButton *m_menuButton = nullptr;
 
     QTimer *m_monitorTimer = nullptr;
+    QTimer *m_deviceInfoTimer = nullptr;
+    int m_chartRefreshSeconds = 1;
+    int m_deviceInfoRefreshSeconds = 5;
     int m_sampleIndex = 0;
     int m_maxSamples = 120;
 
@@ -139,5 +152,7 @@ private:
     bool m_monitorInProgress = false;
     bool m_processInProgress = false;
     bool m_monitorRefreshPending = false;
+    bool m_draggingTitleBar = false;
+    QPoint m_titleBarDragOffset;
     QString m_selectedMonitorCardId;
 };

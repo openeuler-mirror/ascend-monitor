@@ -11,7 +11,7 @@
 - 卡列表：来自 `npu-smi info -l`
 - 卡与芯片映射表：来自 `npu-smi info -m`
 - 卡健康状态与内存汇总：来自 `npu-smi info -t health -i <Card ID>` 和 `npu-smi info -t memory -i <Card ID>`
-- 实时图表监控（1 秒刷新）：
+- 实时图表监控（默认 1 秒刷新，可通过“设置”菜单配置）：
 	- 芯片温度：`npu-smi info -t temp -i <Card ID>`
 	- AICore/AIVector/AICPU 利用率：`npu-smi info -t usages -i <Card ID>`
 	- 卡功耗：`npu-smi info -t power -i <Card ID>`
@@ -19,11 +19,11 @@
 	- 支持按选中 Card ID 展示进程
 	- 未选中时展示所有设备进程
 	- 进程数据解析自 `npu-smi info`
-	- 每秒自动刷新
+	- 默认每秒自动刷新，刷新间隔可通过“设置”菜单配置
 - 远程采集支持（SSH）：可连接仅在远端可用 `npu-smi` 的主机
 - 版本显示：左上角显示 Logo，右上角显示 `npu-smi -v` 解析到的版本号（获取失败时不显示）
 - 启动单实例限制：防止重复启动程序
-- 默认自动刷新：启动后自动采集，监控数据持续刷新
+- 默认自动刷新：图表默认每秒刷新，设备基本信息默认每 5 秒刷新；两者均可通过“设置”菜单配置并会在下次启动时保留
 
 ## 环境要求
 
