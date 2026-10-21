@@ -70,6 +70,8 @@ void ProcReader::collect(Snapshot& s) {
             Process info; info.pid = p.pid; std::string dir = root_ + "/" + std::to_string(p.pid);
             auto stat = parseProcessStat(readText(dir + "/stat")); auto now = Clock::now();
             if (stat) {
+                info.startTicks = stat->start;
+                if (pageSize > 0) info.rssBytes = static_cast<double>(stat->rss) * pageSize;
                 if (hz > 0 && uptime >= static_cast<double>(stat->start) / hz) info.elapsed = uptime - static_cast<double>(stat->start) / hz;
                 if (pageSize > 0 && s.host.memory.total && *s.host.memory.total > 0)
                     info.memoryPercent = static_cast<double>(stat->rss) * pageSize * 100 / *s.host.memory.total;
@@ -91,6 +93,7 @@ void ProcReader::collect(Snapshot& s) {
         }
         p.user = found->second.user; p.command = found->second.command; p.cpu = found->second.cpu;
         p.memoryPercent = found->second.memoryPercent; p.elapsed = found->second.elapsed;
+        p.startTicks = found->second.startTicks; p.rssBytes = found->second.rssBytes;
     }
     previousProcesses_ = std::move(next);
 }

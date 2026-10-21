@@ -36,10 +36,14 @@ void History::appendPoint(HistoryPoint point) {
     while (!points_.empty() && point.time - points_.front().time > std::chrono::seconds(600)) points_.pop_front();
 }
 void BufferedHistory::append(const Snapshot& s) {
-    if (last_ && s.sampled <= *last_) return;
-    last_ = s.sampled;
-    if (!origin_) origin_ = s.sampled;
-    int64_t next = (s.sampled - *origin_) / period_;
+    auto a = aggregate(s);
+    appendValues(s.sampled, {s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core});
+}
+void BufferedHistory::appendValues(Clock::time_point time, const std::array<Value, 5>& values) {
+    if (last_ && time <= *last_) return;
+    last_ = time;
+    if (!origin_) origin_ = time;
+    int64_t next = (time - *origin_) / period_;
     if (next > bucket_) {
         std::array<Value, 5> values{};
         for (size_t i = 0; i < values.size(); ++i)
@@ -52,8 +56,6 @@ void BufferedHistory::append(const Snapshot& s) {
             history_.appendPoint({*origin_ + period_ * (gap + 1), {}, {}, {}, {}, {}, {}});
         bucket_ = next; count_ = 0; sums_.fill(0); missing_.fill(false);
     }
-    auto a = aggregate(s);
-    std::array<Value, 5> values{s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core};
     for (size_t i = 0; i < values.size(); ++i) {
         if (values[i] && std::isfinite(*values[i])) sums_[i] += *values[i];
         else missing_[i] = true;

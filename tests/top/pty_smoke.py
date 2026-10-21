@@ -20,6 +20,9 @@ class Screen:
     def __init__(self, rows, cols):
         self.rows, self.cols = rows, cols
         self.cells = [[' '] * cols for _ in range(rows)]
+        self.attributes = [[0] * cols for _ in range(rows)]
+        self.style = 0  # bold=1, dim=2, reverse=4; foreground index stored above bit 7.
+        self.foreground = -1
         self.y = self.x = 0
         self.pending = ''
         self.acs = False
@@ -32,12 +35,16 @@ class Screen:
         blank = [[' '] * self.cols for _ in range(count)]
         region = self.cells[top:bottom + 1]
         self.cells[top:bottom + 1] = blank + region[:len(region) - count] if down else region[count:] + blank
+        blank_style = [[0] * self.cols for _ in range(count)]
+        styles = self.attributes[top:bottom + 1]
+        self.attributes[top:bottom + 1] = blank_style + styles[:len(styles) - count] if down else styles[count:] + blank_style
 
     def put(self, char):
         if self.acs:
             char = {'q': '─', 'x': '│', 'a': '▒', 'l': '┌', 'k': '┐', 'm': '└', 'j': '┘', 'n': '┼', 't': '├', 'u': '┤', 'v': '┴', 'w': '┬'}.get(char, char)
         if 0 <= self.y < self.rows and 0 <= self.x < self.cols:
             self.cells[self.y][self.x] = char
+            self.attributes[self.y][self.x] = self.style | ((self.foreground + 1) << 8)
         self.x = min(self.cols - 1, self.x + 1)
         self.last = char
 
@@ -82,6 +89,27 @@ class Screen:
                         self.scroll(self.scroll_top, self.scroll_bottom, n, down=op == 'T')
                     elif op in ('L', 'M') and self.scroll_top <= self.y <= self.scroll_bottom:
                         self.scroll(self.y, self.scroll_bottom, n, down=op == 'L')
+                    elif op == 'm':
+                        k = 0
+                        while k < len(args):
+                            value = args[k]
+                            if value == 0: self.style = 0; self.foreground = -1
+                            elif value == 1: self.style |= 1
+                            elif value == 2: self.style |= 2
+                            elif value == 7: self.style |= 4
+                            elif value == 22: self.style &= ~3
+                            elif value == 27: self.style &= ~4
+                            elif 30 <= value <= 37: self.foreground = value - 30
+                            elif 90 <= value <= 97: self.foreground = value - 90 + 8
+                            elif value == 39: self.foreground = -1
+                            elif value in (38, 48) and k + 2 < len(args):
+                                if args[k + 1] == 5:
+                                    if value == 38: self.foreground = args[k + 2]
+                                    k += 2
+                                elif args[k + 1] == 2 and k + 4 < len(args):
+                                    if value == 38: self.foreground = (1 << 24) | (args[k + 2] << 16) | (args[k + 3] << 8) | args[k + 4]
+                                    k += 4
+                            k += 1
                     i += m.end(); continue
                 if s[i + 1] in '()':
                     if i + 2 >= len(s): break
@@ -149,8 +177,10 @@ def run(binary, output):
         assert len(re.findall(r'Share (?:On|Off|N/A)', medium)) == 8, medium
         if output: Path(output, 'screen-medium.txt').write_text(medium)
         send(b'h')
-        assert 'one logical CPU = 100%' in screen.text(), screen.text()
-        assert 'container sharing enabled' in screen.text(), screen.text()
+        assert 'NAVIGATION' in screen.text(), screen.text()
+        send(b'2')
+        assert 'one logical cpu = 100%' in screen.text().lower(), screen.text()
+        assert 'container sharing enabled' in screen.text().lower(), screen.text()
         send(b'h')
         size(24, 90); screen = Screen(24, 90); process.send_signal(signal.SIGWINCH); drain(1)
         assert 'NPU MEM:' in screen.text() and 'Processes:' in screen.text(), screen.text()

@@ -23,7 +23,7 @@
 #define ASCEND_MONITOR_TUI_VERSION "dev"
 #endif
 namespace ascend {
-Sampler::Sampler(double interval) : history_(interval) {
+Sampler::Sampler(double interval) : history_(interval), inspection_(interval) {
     worker_ = std::thread([this, interval] {
         Dcmi dcmi; ProcReader proc;
         while (true) {
@@ -32,7 +32,7 @@ Sampler::Sampler(double interval) : history_(interval) {
             catch (const std::exception& e) { s->error = e.what(); }
             s->sampled = Clock::now(); s->wall = std::chrono::system_clock::now();
             s->collectionSeconds = std::chrono::duration<double>(s->sampled - start).count();
-            std::unique_lock<std::mutex> lock(mutex_); latest_ = s; history_.append(*s);
+            std::unique_lock<std::mutex> lock(mutex_); latest_ = s; history_.append(*s); inspection_.append(*s);
             // Missed deadlines never cause back-to-back catch-up queries.
             auto delay = std::max(0.05, std::min(0.5, interval / 2.0) - s->collectionSeconds);
             if (wake_.wait_for(lock, std::chrono::duration<double>(delay), [this] { return stop_; })) break;
@@ -42,7 +42,15 @@ Sampler::Sampler(double interval) : history_(interval) {
 Sampler::~Sampler() { { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; } wake_.notify_all(); worker_.join(); }
 std::shared_ptr<const Snapshot> Sampler::latest() { std::lock_guard<std::mutex> lock(mutex_); return latest_; }
 History Sampler::history() { std::lock_guard<std::mutex> lock(mutex_); return history_.history(); }
+void Sampler::inspect(std::optional<ProcessIdentity> identity) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    inspection_.target(identity);
+    if (latest_) inspection_.append(*latest_);
+}
+ProcessInspection Sampler::inspection() { std::lock_guard<std::mutex> lock(mutex_); return inspection_; }
 static bool asciiGraphics = false;
+static bool mutedDevice = false;
+static attr_t textStyle(int color) { return COLOR_PAIR(color) | (mutedDevice ? A_DIM : A_NORMAL); }
 static bool canDrawBraille() {
     // Respect the requested locale; C/POSIX and invalid locales fall back to ASCII.
     if (!std::setlocale(LC_ALL, "")) return false;
@@ -62,7 +70,7 @@ static void stopSignal(int) { interrupted = 1; }
 static void text(int y, int x, const std::string& s, int color = 0, int maxWidth = -1) {
     if (y < 0 || y >= LINES || x < 0 || x >= COLS) return;
     int width = std::max(0, COLS - x - 1); if (maxWidth >= 0) width = std::min(width, maxWidth);
-    attrset(COLOR_PAIR(color)); mvaddnstr(y, x, safeText(s).c_str(), width); attrset(A_NORMAL);
+    attrset(textStyle(color)); mvaddnstr(y, x, safeText(s).c_str(), width); attrset(A_NORMAL);
 }
 static std::string fit(const std::string& s, size_t n) { if (s.size() > n) return s.substr(0, n - 1) + "~"; return s + std::string(n - s.size(), ' '); }
 static std::string deviceId(std::optional<unsigned> v) { return v ? std::to_string(*v) : "N/A"; }
@@ -72,13 +80,22 @@ static void bar(int y, int x, int width, const std::string& label, Value v) {
     if (width < 15) return; text(y, x, label, severity(v));
     int w = width - 13;
     int fill = v && *v > 0 ? std::max(1, static_cast<int>(std::clamp(*v, 0.0, 100.0) * w / 100)) : 0;
-    attrset(COLOR_PAIR(severity(v))); for (int i = 0; i < w; ++i) mvaddch(y, x + 5 + i, i < fill ? (static_cast<chtype>(' ') | A_REVERSE) : ' '); attrset(A_NORMAL);
+    // Faint applies to foreground glyphs reliably; reversed spaces color the background.
+    const wchar_t block[] = {L'\u2588', 0};
+    bool unicodeFill = !asciiGraphics && wcwidth(block[0]) == 1;
+    attrset(textStyle(severity(v)));
+    for (int i = 0; i < w; ++i) {
+        if (i < fill && unicodeFill) mvaddnwstr(y, x + 5 + i, block, 1);
+        else mvaddch(y, x + 5 + i, i < fill ? '#' : ' ');
+    }
+    attrset(A_NORMAL);
     text(y, x + width - 7, number(v, 1, "%"), severity(v), 7);
 }
-static void chart(int y, int x, int width, int height, const History& h, Value HistoryPoint::*member, double secondsPerColumn, int color, Clock::time_point now, bool inverted = false) {
+static void chart(int y, int x, int width, int height, const History& h, Value HistoryPoint::*member, double secondsPerColumn, int color, Clock::time_point now, bool inverted = false, double maximum = 100) {
     if (width < 10 || height < 1) return;
     int resolution = asciiGraphics ? width : width * 2;
     auto columns = historyColumns(h, member, resolution, secondsPerColumn, now);
+    for (auto& v : columns) if (v) *v = *v * 100 / maximum;
     if (asciiGraphics) {
         attrset(COLOR_PAIR(color));
         for (int col = 0; col < width; ++col) if (columns[col]) {
@@ -122,35 +139,136 @@ static void ticks(int y, int x, int width, double secondsPerCell) {
         lastLeft = start;
     }
 }
-static void help() {
-    erase(); std::vector<std::string> lines = {
-        "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION " | Help",
-        std::string("Graphics: ") + (asciiGraphics ? "ASCII (forced or locale fallback)" : "Unicode Braille (2x4 dots per cell)"), "", "q / Esc   Quit         h / ?   Toggle help",
-        "Up/Down, j/k   Scroll focused list      Tab   Switch device/process focus",
-        "PageUp/PageDown   Scroll a page        Home/End   First/last row",
-        "Left/Right   Pan process command      Resize   Reflow without losing history", "",
-        "Click NPU-MEM / %MEM / %CPU header to sort; click again to reverse.",
-        "s / S   Cycle NPU memory, host memory, CPU (descending)     /   Reverse sort",
-        "Triangle: down = descending, up = ascending (ASCII: v / ^). Missing values last.",
-        "Process sorting is global; each chip's process memory stays a separate row.", "",
-        "NPU = physical device ID. Card/Chip identify the driver endpoint.",
-        "Logic ID may differ from NPU. Share = container sharing enabled: On / Off / N/A.",
-        "Share refreshes every 5s; N/A means unavailable, unsupported or query failed.",
-        "DDR/HBM label describes capacity, never memory bandwidth.",
-        "Power is CHIP power (W). Unsupported readings stay N/A; card MCU power is not substituted.",
-        "NPU MEM = sum(used) / sum(total) of readable chips. CORE = mean of readable chips.",
-        "Coverage (readable/total) is shown. Missing readings create gaps in charts.",
-        "Host CPU: all logical CPUs combined, 0-100%; iowait counts as idle.",
-        "Process CPU: one logical CPU = 100%; multithreaded processes can exceed 100%.",
-        "First CPU sample is N/A. Process MEM = RSS / host RAM; TIME = elapsed wall time.",
-        "Host MEM = total - available. No swap configured is 0%. Process exit/reuse resets CPU.",
-        "One process may appear on several NPUs; each row has that device's NPU memory.",
-        "Charts share a time scale: one averaged point per interval (default 1s).",
-        "Default collection target: 0.5s. Finalized averages stay fixed; missing buckets stay blank.",
-        "Collection is local. Driver errors/stale data are shown; press q to exit.", "", "Press h, ? or Esc to return."
+struct HelpLine {
+    std::string key, description;
+    bool heading = false;
+};
+struct HelpState {
+    int page = 0, offset = 0, maxOffset = 0, tabX = 0, tabY = -1;
+    void select(int next) { if (page != next) { page = next; offset = 0; } }
+};
+static const std::array<std::string, 2> helpTabs{"1 Shortcuts", "2 Metrics"};
+static std::vector<HelpLine> helpLines(int page, int width) {
+    constexpr int keyWidth = 22;
+    std::vector<HelpLine> lines;
+    auto section = [&](const std::string& title) {
+        if (!lines.empty()) lines.push_back({});
+        lines.push_back({title, "", true});
     };
-    for (size_t i = 0; i < lines.size() && static_cast<int>(i) < LINES; ++i) text(static_cast<int>(i), 1, lines[i]);
+    auto entry = [&](const std::string& key, const std::string& description) {
+        const size_t available = static_cast<size_t>(std::max(1, width - keyWidth - 2));
+        size_t start = 0; bool first = true;
+        while (start < description.size()) {
+            size_t end = std::min(description.size(), start + available);
+            if (end < description.size() && description[end] != ' ') {
+                auto space = description.rfind(' ', end);
+                if (space != std::string::npos && space > start) end = space;
+            }
+            lines.push_back({first ? key : "", description.substr(start, end - start), false});
+            first = false; start = end;
+            while (start < description.size() && description[start] == ' ') ++start;
+        }
+    };
+    if (page == 0) {
+        section("NAVIGATION");
+        entry("Up / Down, j / k", "Select a process; scroll devices when the device list has focus.");
+        entry("Tab", "Switch focus between the device and process lists.");
+        entry("PgUp / PgDn", "Move one page in the focused list.");
+        entry("Home / End", "Go to the first or last row.");
+        entry("Left / Right", "Scroll a long process command horizontally.");
+        section("PROCESS SELECTION");
+        entry("Click process", "Select and follow a process across refreshes and sorting.");
+        entry("Click outside rows", "Clear selection, except when clicking a sort header.");
+        entry("Enter", "Open process details; press Enter again to return to the list.");
+        entry("Linked NPUs", "Keep their normal colors; other NPUs fade in their original colors.");
+        section("SORTING");
+        entry("Click sort header", "Sort by NPU-MEM, %MEM or %CPU; click again to reverse.");
+        entry("s / S", "Cycle NPU memory, host memory and CPU; start in descending order.");
+        entry("/", "Reverse the current sort direction.");
+        entry("Direction marker", "Down = descending, up = ascending (ASCII: v / ^). Missing values last.");
+        section("BACK & EXIT");
+        entry("Esc", "Close help/details; on the main screen, clear selection before quitting.");
+        entry("q", "Return from help/details; quit from the main screen.");
+        entry("h / ?", "Open or close help. Sampling continues while help is open.");
+    } else {
+        section("DEVICE ID & STATUS");
+        entry("NPU ID", "Physical device ID. Logical ID is a separate driver/runtime identifier.");
+        entry("Card / Chip", "Driver endpoint for a chip on a card; not the physical or logical NPU ID.");
+        entry("Share", "Container sharing enabled: On / Off / N/A. Refreshed every 5 seconds.");
+        entry("N/A", "Unavailable, unsupported or failed reading; never a measured zero.");
+        section("MEMORY & POWER");
+        entry("DDR / HBM", "Memory capacity, not memory bandwidth. Memory sizes use MiB / GiB.");
+        entry("Chip power", "Measured in W. Card MCU power is never substituted for chip power.");
+        entry("NPU summary", "Sum(used) / sum(total); AI Core is the mean of readable chips. Coverage is readable/total.");
+        section("HOST & PROCESS METRICS");
+        entry("Host CPU", "Whole-machine 0-100%; idle and iowait count as idle.");
+        entry("Process CPU", "One logical CPU = 100%; multithreaded processes can exceed 100%.");
+        entry("Host memory", "Total minus available. Swap is used/total; no configured swap means 0%.");
+        entry("Process memory", "RSS / host RAM. First CPU sample, process exit or PID reuse gives N/A CPU.");
+        entry("TIME", "Elapsed wall time since process start, not accumulated CPU time.");
+        entry("NPU-MEM rows", "Each row holds that chip's process memory; one PID may appear on several chips.");
+        entry("Process details", "NPU Memory sums chips. CPU Usage and Host Memory (RSS) are counted once.");
+        entry("Selection identity", "PID plus starttime. Unverified process identities cannot be selected.");
+        section("HISTORY & DATA QUALITY");
+        entry("History", "Process history starts at selection; keeps the last 600 seconds. Resize preserves history.");
+        entry("Y-axis", "Vertical range of each detail chart; automatically scales to current and retained readings.");
+        entry("Sampling", "Default collection target is 0.5s; one completed average per interval (default 1s).");
+        entry("Missing data", "Missing readings/windows stay blank. Finalized averages do not change; no interpolation.");
+        entry("STALE", "No new snapshot for more than 3 seconds. Driver errors are shown; collection is local.");
+    }
+    return lines;
 }
+static void help(HelpState& state) {
+    erase(); state.tabY = -1;
+    if (COLS < 40 || LINES < 10) {
+        text(0, 0, "Help: resize to at least 40 x 10.");
+        text(2, 0, "Esc / h / q: back");
+        return;
+    }
+    const int width = std::min(108, COLS - 4), left = (COLS - width) / 2;
+    auto label = [&](int y, int x, const std::string& value, int available, bool bold = false, int color = 0) {
+        attrset(COLOR_PAIR(color) | (bold ? A_BOLD : A_NORMAL));
+        mvaddnstr(y, x, value.c_str(), available);
+        attrset(A_NORMAL);
+    };
+    label(1, left, "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION " | Help", width, true);
+    label(2, left, std::string("Graphics: ") + (asciiGraphics ? "ASCII" : "Unicode Braille (2x4 dots/cell)")
+        + "  |  Sampling continues", width);
+    state.tabY = 3; state.tabX = left;
+    int x = left;
+    for (int page = 0; page < 2; ++page) {
+        auto tab = " " + helpTabs[page] + " ";
+        attrset(page == state.page ? A_REVERSE | A_BOLD : A_NORMAL);
+        mvaddnstr(3, x, tab.c_str(), static_cast<int>(tab.size()));
+        attrset(A_NORMAL); x += static_cast<int>(tab.size()) + 3;
+    }
+    rule(4, left, width);
+    auto lines = helpLines(state.page, width);
+    const int height = LINES - 9;
+    state.maxOffset = std::max(0, static_cast<int>(lines.size()) - height);
+    state.offset = std::clamp(state.offset, 0, state.maxOffset);
+    for (int row = 0; row < height && state.offset + row < static_cast<int>(lines.size()); ++row) {
+        const auto& line = lines[state.offset + row];
+        if (line.heading) label(6 + row, left, line.key, width, true, 4);
+        else {
+            label(6 + row, left, line.key, 22, true);
+            label(6 + row, left + 24, line.description, width - 24);
+        }
+    }
+    rule(LINES - 3, left, width);
+    label(LINES - 2, left, "1/2 or Tab: page | Up/Down/PgUp/PgDn: scroll | Esc/h/q: back", width);
+    label(LINES - 1, left, "Page " + std::to_string(state.page + 1) + "/2 | " + helpTabs[state.page].substr(2)
+        + " | Lines " + std::to_string(state.offset + 1) + "-"
+        + std::to_string(std::min(state.offset + height, static_cast<int>(lines.size())))
+        + " / " + std::to_string(lines.size()), width);
+}
+struct ProcessRows {
+    int y = -1, x = 0, width = 0, count = 0, offset = 0;
+    std::optional<size_t> hit(int row, int column) const {
+        if (y < 0 || row < y || row >= y + count || column < x || column >= x + width) return {};
+        return static_cast<size_t>(offset + row - y);
+    }
+};
 // All panels share real curses borders; text is clipped inside each cell.
 static void vertical(int y, int x, int height) {
     if (height > 0) mvvline(y, x, lineGlyph(ACS_VLINE), height);
@@ -165,7 +283,7 @@ static void tableRule(int y, const std::vector<int>& columns, bool top = false, 
     }
 }
 static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double interval,
-                 const ProcessSort& sort, ProcessHeader& processHeader) {
+                 const ProcessSort& sort, ProcessHeader& processHeader, ProcessRows& processRows, const ProcessSelection& selection) {
     erase();
     const int left = 1, right = COLS - 2;
     auto now = Clock::now();
@@ -210,8 +328,10 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     int visible = std::max(1, std::min(static_cast<int>(s.devices.size()), (LINES - 15 - historyHeight) / 3));
     deviceOffset = std::clamp(deviceOffset, 0, std::max(0, static_cast<int>(s.devices.size()) - visible));
     int y = compact ? 6 : 7;
+    auto linked = selection.identity() ? processDevices(s, *selection.identity()) : std::set<std::pair<int, int>>{};
     for (int i = deviceOffset; i < std::min(deviceOffset + visible, static_cast<int>(s.devices.size())); ++i) {
         const auto& d = s.devices[i]; int color = severity(d.memory.percent());
+        mutedDevice = !linked.empty() && !linked.count({d.card, d.chip});
         cell(y, 0, fit(deviceId(d.physical), 5) + d.name, color);
         cell(y + 1, 0, fit(number(d.temperature, 0, "C"), 10) + number(d.power, 1, "W"), color);
         cell(y, 1, d.pci + " " + d.memory.kind, color);
@@ -224,6 +344,7 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
         cell(y + 1, 2, number(d.core, 0, "%") + "  Logic " + deviceId(d.logical), color);
         bar(y, columns[3] + 2, right - columns[3] - 3, "MEM:", d.memory.percent());
         bar(y + 1, columns[3] + 2, right - columns[3] - 3, "UTL:", d.core);
+        mutedDevice = false;
         for (int x : columns) vertical(y, x, 2);
         tableRule(y + 2, columns);
         y += 3;
@@ -275,6 +396,8 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     text(y, left + 2, std::string(!deviceFocus ? "> " : "") + "Processes:" + (compact && s.host.root ? " [root]" : "")
         + "  [click header / s: sort]");
     auto identity = s.host.user + "@" + s.host.hostname;
+    if (selection.identity()) text(y, left + 42, "PID " + std::to_string(selection.identity()->pid) + " [Enter]", 0,
+        std::max(0, right - static_cast<int>(identity.size()) - left - 45));
     text(y++, std::max(left + 18, right - static_cast<int>(identity.size()) - 1), identity, 1, right - left - 20);
     processHeader = {y, left + 2, right - left - 3};
     text(y, left + 2, fit("NPU", 5) + fit("PID", 9) + fit("USER", 10) + fit("NPU-MEM", 12)
@@ -294,13 +417,24 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     tableRule(y++, {left, right});
     int rows = std::max(0, LINES - y - 2);
     auto processes = sortedProcesses(s, sort);
+    auto selected = selection.index(processes);
+    if (selected && rows > 0) {
+        if (static_cast<int>(*selected) < processOffset) processOffset = static_cast<int>(*selected);
+        if (static_cast<int>(*selected) >= processOffset + rows) processOffset = static_cast<int>(*selected) - rows + 1;
+    }
     processOffset = std::clamp(processOffset, 0, std::max(0, static_cast<int>(processes.size()) - rows));
+    processRows = {y, left + 2, right - left - 3, std::min(rows, static_cast<int>(processes.size()) - processOffset), processOffset};
     for (int i = processOffset; i < std::min(processOffset + rows, static_cast<int>(processes.size())); ++i) {
         const auto& p = *processes[i];
         auto command = p.command.size() > static_cast<size_t>(pan) ? p.command.substr(pan) : "";
-        text(y++, left + 2, fit(deviceId(p.physical), 5) + fit(std::to_string(p.pid), 9) + fit(p.user, 10)
+        const auto line = fit(deviceId(p.physical), 5) + fit(std::to_string(p.pid), 9) + fit(p.user, 10)
             + fit(bytes(p.npuBytes), 12) + fit(number(p.cpu), 7) + fit(number(p.memoryPercent), 7)
-            + fit(duration(p.elapsed), 10) + command, 0, right - left - 3);
+            + fit(duration(p.elapsed), 10) + command;
+        if (selected && static_cast<size_t>(i) == *selected) {
+            attrset(A_REVERSE);
+            mvaddnstr(y++, left + 2, fit(line, static_cast<size_t>(right - left - 3)).c_str(), right - left - 3);
+            attrset(A_NORMAL);
+        } else text(y++, left + 2, line, 0, right - left - 3);
     }
     if (s.processes.empty() && rows) {
         bool all = !s.devices.empty() && std::all_of(s.devices.begin(), s.devices.end(), [](const Device& d) { return d.processesAvailable; });
@@ -314,44 +448,159 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     tableRule(processBottom, {left, right}, false, true);
     if (!s.error.empty()) text(LINES - 1, left, s.error, 2);
 }
+static void drawProcessDetails(const ProcessInspection& inspection, const Snapshot& snapshot, double interval) {
+    erase();
+    text(0, 1, "Process details | Enter / Esc / q: back | h: help");
+    if (COLS < 90 || LINES < 24) {
+        text(3, 1, "Terminal too small: need 90 columns x 24 rows. Resize or press Esc.");
+        return;
+    }
+    if (!inspection.identity()) { text(2, 1, "Select a process first."); return; }
+    const auto& current = inspection.current();
+    text(1, 1, "PID " + std::to_string(inspection.identity()->pid) + "   USER " + current.user
+        + "   TIME " + duration(current.elapsed));
+    text(2, 1, "COMMAND: " + current.command);
+    std::string devices = "NPUs:";
+    for (auto endpoint : current.devices) {
+        auto d = std::find_if(snapshot.devices.begin(), snapshot.devices.end(), [&](const Device& device) {
+            return endpoint == std::make_pair(device.card, device.chip);
+        });
+        devices += " " + (d != snapshot.devices.end() ? deviceId(d->physical) : "N/A")
+            + " (" + std::to_string(endpoint.first) + "/" + std::to_string(endpoint.second) + ")";
+    }
+    text(3, 1, devices);
+    double age = std::chrono::duration<double>(Clock::now() - snapshot.sampled).count();
+    auto status = current.state == ProcessState::Available ? "LIVE" : current.state == ProcessState::Exited
+        ? "Process exited or released all NPUs" : "Process data unavailable";
+    text(4, 1, std::string(status) + (age > 3 ? " | STALE " + number(age, 0, "s") : ""),
+        current.state != ProcessState::Available || age > 3 ? 2 : 0);
+    text(5, 1, "History since selection; last 600s. NPU memory sums chips; CPU / RSS counted once.");
+    const int graphHeight = std::max(2, (LINES - 9) / 3 - 2);
+    const auto& history = inspection.history();
+    int y = 6;
+    auto graph = [&](const std::string& label, Value value, Value HistoryPoint::*member, int color, bool cpu) {
+        double peak = cpu ? 100 : 1024 * 1024;
+        for (const auto& point : history.points()) {
+            auto v = point.*member;
+            if (v && std::isfinite(*v)) peak = std::max(peak, *v);
+        }
+        if (value && std::isfinite(*value)) peak = std::max(peak, *value);
+        double maximum = cpu ? std::ceil(peak / 100) * 100 : std::pow(2.0, std::ceil(std::log2(peak)));
+        std::string reading = cpu ? number(value, 1, "%") : bytes(value);
+        if (member == &HistoryPoint::memory) reading += " (" + number(current.hostPercent, 1, "%") + ")";
+        text(y++, 1, label + ": " + reading + "    Y-axis: 0 - "
+            + (cpu ? number(maximum, 0, "%") : bytes(maximum)), color);
+        chart(y, 2, COLS - 4, graphHeight, history, member, interval, color, current.sampled, false, maximum);
+        y += graphHeight;
+        ticks(y++, 2, COLS - 4, (asciiGraphics ? 1 : 2) * interval);
+    };
+    graph("NPU Memory", current.npuBytes, &HistoryPoint::npuMemory, 2, false);
+    graph("CPU Usage", current.cpu, &HistoryPoint::cpu, 4, true);
+    graph("Host Memory (RSS)", current.hostBytes, &HistoryPoint::memory, 5, false);
+    if (!current.npuBytes && current.state == ProcessState::Available)
+        text(LINES - 1, 1, "NPU total unavailable: incomplete device process data or missing device memory.", 2);
+}
 int runTui(double interval, bool ascii) {
     bool brailleAvailable = canDrawBraille();
     asciiGraphics = ascii || !brailleAvailable;
-    struct Terminal { Terminal() { initscr(); cbreak(); noecho(); keypad(stdscr, TRUE); curs_set(0); timeout(100); if (has_colors()) {
+    struct Terminal { Terminal() { initscr(); cbreak(); noecho(); keypad(stdscr, TRUE); curs_set(0); timeout(100);
+#ifdef NCURSES_EXT_FUNCS
+        set_escdelay(50);
+#endif
+        if (has_colors()) {
         start_color(); use_default_colors(); init_pair(1, COLOR_GREEN, -1); init_pair(2, COLOR_YELLOW, -1); init_pair(3, COLOR_RED, -1);
         init_pair(4, COLOR_CYAN, -1); init_pair(5, COLOR_MAGENTA, -1); init_pair(6, COLOR_BLUE, -1);
     } mousemask(BUTTON1_CLICKED, nullptr); mouseinterval(150);
     } ~Terminal() { mousemask(0, nullptr); endwin(); } } terminal;
     interrupted = 0; auto oldInt = std::signal(SIGINT, stopSignal); auto oldTerm = std::signal(SIGTERM, stopSignal);
     {
-        Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0; bool deviceFocus = false, showHelp = false;
-        ProcessSort sort; ProcessHeader processHeader;
+        Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0;
+        bool deviceFocus = false, showHelp = false, showDetails = false;
+        ProcessSort sort; ProcessHeader processHeader; ProcessRows processRows; ProcessSelection selection; HelpState helpState;
+        std::string notice;
         while (!interrupted) {
-            processHeader = {};
+            processHeader = {}; processRows = {};
             auto s = sampler.latest();
-            if (showHelp) help(); else if (s) draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval, sort, processHeader);
-            else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
-            refresh(); int key = getch(); int& offset = deviceFocus ? deviceOffset : processOffset;
-            if (!showHelp && key == KEY_MOUSE) {
-                MEVENT event{};
-                if (getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED)) {
-                    auto field = processHeader.hit(event.y, event.x);
-                    if (field) { sort.select(*field); processOffset = 0; deviceFocus = false; }
+            auto rows = s ? sortedProcesses(*s, sort) : std::vector<const Process*>{};
+            if (!showDetails && s && s->error.empty() && std::all_of(s->devices.begin(), s->devices.end(),
+                [](const Device& d) { return d.processesAvailable; })) selection.reconcile(rows);
+            sampler.inspect(selection.identity());
+            if (showHelp) help(helpState);
+            else if (s && showDetails) drawProcessDetails(sampler.inspection(), *s, interval);
+            else if (s) {
+                draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval,
+                    sort, processHeader, processRows, selection);
+                if (!notice.empty()) text(LINES - 1, 1, notice, 2);
+            } else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
+            refresh(); int key = getch();
+            MEVENT event{}; bool mouse = key == KEY_MOUSE && getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED);
+            if (showHelp) {
+                if (key == 'h' || key == '?' || key == 27 || key == 'q') showHelp = false;
+                else if (key == '1' || key == '2') helpState.select(key - '1');
+                else if (key == '\t' || key == KEY_BTAB || key == KEY_LEFT || key == KEY_RIGHT) helpState.select(1 - helpState.page);
+                else if (key == KEY_DOWN || key == 'j') ++helpState.offset;
+                else if (key == KEY_UP || key == 'k') --helpState.offset;
+                else if (key == KEY_NPAGE) helpState.offset += std::max(1, LINES - 9);
+                else if (key == KEY_PPAGE) helpState.offset -= std::max(1, LINES - 9);
+                else if (key == KEY_HOME) helpState.offset = 0;
+                else if (key == KEY_END) helpState.offset = helpState.maxOffset;
+                else if (mouse && event.y == helpState.tabY) {
+                    int x = helpState.tabX;
+                    for (int page = 0; page < 2; ++page) {
+                        int width = static_cast<int>(helpTabs[page].size()) + 2;
+                        if (event.x >= x && event.x < x + width) helpState.select(page);
+                        x += width + 3;
+                    }
+                }
+                continue;
+            }
+            if (key == 'h' || key == '?') { showHelp = true; helpState = {}; continue; }
+            if (showDetails) {
+                if (key == 'q' || key == 27 || key == '\n' || key == '\r' || key == KEY_ENTER) showDetails = false;
+                continue;
+            }
+            if (key == 'q') break;
+            if (key == 27) {
+                if (selection.identity()) { selection.clear(); notice.clear(); } else break;
+                continue;
+            }
+            auto followDevice = [&] {
+                notice.clear();
+                if (!s || !selection.identity()) return;
+                auto linked = processDevices(*s, *selection.identity());
+                for (size_t i = 0; i < s->devices.size(); ++i)
+                    if (linked.count({s->devices[i].card, s->devices[i].chip})) { deviceOffset = static_cast<int>(i); break; }
+            };
+            if (mouse) {
+                auto field = processHeader.hit(event.y, event.x);
+                auto index = processRows.hit(event.y, event.x);
+                if (field) { sort.select(*field); if (!selection.identity()) processOffset = 0; deviceFocus = false; }
+                else if (index && *index < rows.size()) {
+                    if (selection.select(*rows[*index])) { deviceFocus = false; followDevice(); }
+                    else notice = "Process identity unavailable; cannot safely select this PID.";
+                } else { selection.clear(); notice.clear(); }
+            }
+            if (key == '\n' || key == '\r' || key == KEY_ENTER) {
+                if (selection.identity()) showDetails = true;
+                else notice = "Click a process or use Up/Down to select, then press Enter.";
+            }
+            if (key == 's' || key == 'S' || key == '/') {
+                if (key == '/') sort.descending = !sort.descending; else sort.next();
+                if (!selection.identity()) processOffset = 0;
+            }
+            if (key == '\t') deviceFocus = !deviceFocus;
+            int delta = key == KEY_DOWN || key == 'j' ? 1 : key == KEY_UP || key == 'k' ? -1
+                : key == KEY_NPAGE ? std::max(1, processRows.count) : key == KEY_PPAGE ? -std::max(1, processRows.count) : 0;
+            if (deviceFocus) {
+                if (delta) deviceOffset = std::max(0, deviceOffset + delta);
+                if (key == KEY_HOME) deviceOffset = 0;
+                if (key == KEY_END) deviceOffset = s ? static_cast<int>(s->devices.size()) : 0;
+            } else {
+                if (delta) { selection.move(rows, delta); followDevice(); }
+                if (!rows.empty() && (key == KEY_HOME || key == KEY_END)) {
+                    selection.clear(); selection.move(rows, key == KEY_HOME ? 1 : -1); followDevice();
                 }
             }
-            if (!showHelp && (key == 's' || key == 'S' || key == '/')) {
-                if (key == '/') sort.descending = !sort.descending; else sort.next();
-                processOffset = 0;
-            }
-            if (key == 'q' || (key == 27 && !showHelp)) break;
-            if (key == 'h' || key == '?' || (key == 27 && showHelp)) showHelp = !showHelp;
-            if (key == '\t') deviceFocus = !deviceFocus;
-            if (key == KEY_DOWN || key == 'j') ++offset;
-            if (key == KEY_UP || key == 'k') offset = std::max(0, offset - 1);
-            if (key == KEY_NPAGE) offset += 5;
-            if (key == KEY_PPAGE) offset = std::max(0, offset - 5);
-            if (key == KEY_HOME) offset = 0;
-            if (key == KEY_END) offset = s ? static_cast<int>(deviceFocus ? s->devices.size() : s->processes.size()) : 0;
             if (key == KEY_RIGHT) pan = std::min(1048576, pan + 8);
             if (key == KEY_LEFT) pan = std::max(0, pan - 8);
         }

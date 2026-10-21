@@ -52,12 +52,15 @@ int main() {
         ProcReader reader(root); Snapshot first; Process proc; proc.pid = 42; proc.card = 1; proc.chip = 0; proc.npuBytes = 100;
         first.processes.push_back(proc); proc.chip = 1; proc.npuBytes = 200; first.processes.push_back(proc);
         reader.collect(first); check(!first.host.cpu && !first.processes[0].cpu, "first delta unavailable"); near(first.host.memory.percent(), 75); near(first.host.swap.percent(), 0);
+        check(first.processes[0].startTicks == 400 && first.processes[1].startTicks == 400, "verified identity shared across chips");
+        near(first.processes[0].rssBytes, 100.0 * sysconf(_SC_PAGESIZE));
         write(dir / "stat", "cpu 125 0 0 175 0 0 0 0"); write(dir / "42/stat", statText(150, 400, 100));
         Snapshot second; second.processes = first.processes; reader.collect(second); near(second.host.cpu, 25);
         check(second.processes[0].cpu && second.processes[0].cpu == second.processes[1].cpu, "same PID sampled once across devices");
         near(second.processes[0].npuBytes, 100); near(second.processes[1].npuBytes, 200);
         write(dir / "42/stat", statText(1, 500, 100)); Snapshot reused; reused.processes = first.processes; reader.collect(reused); check(!reused.processes[0].cpu, "PID reuse resets delta");
         std::filesystem::remove(dir / "42/stat"); Snapshot exited; exited.processes = first.processes; reader.collect(exited); check(!exited.processes[0].cpu && exited.processes[0].command == "N/A", "exited process unavailable");
+        check(!exited.processes[0].startTicks && !exited.processes[0].rssBytes, "unavailable process clears identity and RSS");
         check(safeText("a\033\nb") == "a  b", "terminal control injection sanitized");
         check(duration(360001) == "100:00:01", "long elapsed duration");
         check(snapshotJson(exited).find("\"cpu_percent\":null") != std::string::npos, "JSON missing vs zero");

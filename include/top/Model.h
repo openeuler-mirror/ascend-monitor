@@ -29,6 +29,8 @@ struct Process {
     std::optional<unsigned> physical;
     std::string user = "N/A", command = "N/A";
     Value npuBytes, cpu, memoryPercent, elapsed;
+    std::optional<uint64_t> startTicks; // /proc starttime; never use PID alone for selection.
+    Value rssBytes;
 };
 struct Host {
     Value cpu, load1, load5, load15;
@@ -66,6 +68,8 @@ public:
     explicit BufferedHistory(double interval = 1.0) : history_(interval),
         period_(std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval))) {}
     void append(const Snapshot& snapshot);
+    // Same fixed buckets, with caller-supplied values in HistoryPoint field order.
+    void appendValues(Clock::time_point time, const std::array<Value, 5>& values);
     const History& history() const { return history_; }
 private:
     History history_;

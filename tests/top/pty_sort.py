@@ -108,7 +108,7 @@ def run(binary, ascii_only, output=None):
         send(b'S')
         expect('NPU-MEM', True)
         send(b'h')
-        assert 'Click NPU-MEM' in screen.text()
+        assert 'SORTING' in screen.text() and 'Click sort header' in screen.text()
         click(line.index('%CPU'), y)
         send(b'h')
         expect('NPU-MEM', True)
