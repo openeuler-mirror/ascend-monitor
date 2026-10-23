@@ -22,7 +22,8 @@ int main(int argc, char** argv) {
                 "  --ascii      Use ASCII graphics instead of Unicode Braille\n"
                 "  --version    Show version\n"
                 "Keys: h help, q quit, Tab focus, arrows/PageUp/PageDown scroll.\n"
-                "Sort: click NPU-MEM/%MEM/%CPU headers, s cycle field, / reverse.\n"; return 0;
+                "Sort: click NPU-MEM/%MEM/%CPU headers, s cycle field, / reverse.\n"
+                "Select: click process or Up/Down; Enter details; Esc back/clear selection.\n"; return 0;
         }
         if (arg == "--version") { std::cout << "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "\n"; return 0; }
         if (arg == "--ascii") { ascii = true; continue; }

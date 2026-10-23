@@ -1,5 +1,6 @@
 #pragma once
 #include "top/Model.h"
+#include "top/ProcessView.h"
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -12,6 +13,8 @@ public:
     ~Sampler();
     std::shared_ptr<const Snapshot> latest();
     History history();
+    void inspect(std::optional<ProcessIdentity> identity);
+    ProcessInspection inspection();
 private:
     std::mutex mutex_;
     std::condition_variable wake_;
@@ -19,6 +22,7 @@ private:
     std::thread worker_;
     std::shared_ptr<const Snapshot> latest_;
     BufferedHistory history_;
+    ProcessInspection inspection_;
 };
 int runTui(double interval, bool ascii = false);
 }
