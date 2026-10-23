@@ -4,6 +4,7 @@
 #include "top/Proc.h"
 #include <cstdlib>
 #include <fstream>
+#include <stdexcept>
 namespace ascend {
 struct Dcmi::Impl {};
 Dcmi::Dcmi() : impl_(std::make_unique<Impl>()) {}
@@ -31,6 +32,8 @@ void Dcmi::collect(Snapshot& s) {
     }
 }
 ProcReader::ProcReader(std::string root) : root_(std::move(root)) {}
-void ProcReader::collect(Snapshot&) {}
+void ProcReader::collect(Snapshot&) {
+    if (std::getenv("ASCEND_TEST_PROC_THROW")) throw std::runtime_error("/proc fixture failure");
+}
 }
 int main(int argc, char** argv) { return ascend::runTui(.2, argc > 1 && std::string(argv[1]) == "--ascii"); }

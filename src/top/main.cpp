@@ -1,5 +1,4 @@
-#include "top/Dcmi.h"
-#include "top/Proc.h"
+#include "top/SampleRound.h"
 #include "top/Tui.h"
 #include <clocale>
 #include <cmath>
@@ -37,10 +36,9 @@ int main(int argc, char** argv) {
     }
     try {
         if (json) {
-            ascend::Dcmi dcmi; ascend::ProcReader proc; ascend::Snapshot first;
-            dcmi.collect(first); proc.collect(first); std::this_thread::sleep_for(std::chrono::duration<double>(interval));
-            auto begin = ascend::Clock::now(); ascend::Snapshot s; dcmi.collect(s); proc.collect(s);
-            s.collectionSeconds = std::chrono::duration<double>(ascend::Clock::now() - begin).count();
+            ascend::SampleRound sampling;
+            sampling.collect(); std::this_thread::sleep_for(std::chrono::duration<double>(interval));
+            auto s = sampling.collect();
             std::cout << ascend::snapshotJson(s) << '\n'; return s.devices.empty() || !s.error.empty() ? 1 : 0;
         }
         if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) { std::cerr << "Interactive terminal required; use --json for a snapshot\n"; return 2; }
