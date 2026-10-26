@@ -185,6 +185,32 @@ def run(binary, ascii_only, output=None, fixture=False):
             os.close(slave)
 
 
+def check_sample_error(binary):
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 55, 120, 0, 0))
+    process = subprocess.Popen([binary, '--ascii'], stdin=slave, stdout=slave, stderr=slave,
+                               env={**os.environ, 'TERM': 'xterm-256color', 'LC_ALL': 'C',
+                                    'ASCEND_TEST_PROC_THROW': '1'}, start_new_session=True)
+    screen = Screen(55, 120)
+    try:
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            if select.select([master], [], [], .1)[0]: screen.feed(os.read(master, 65536))
+        frame = screen.text()
+        assert '/proc fixture failure' in frame and frame.count('TEST-NPU') == 3, frame
+        os.write(master, b'q')
+        end = time.monotonic() + 10
+        while process.poll() is None and time.monotonic() < end:
+            if select.select([master], [], [], .1)[0]: os.read(master, 65536)
+        process.wait(timeout=10)
+        assert process.returncode == 0
+        print('Partial sampling error PTY passed')
+    finally:
+        if process.poll() is None: process.kill(); process.wait()
+        os.close(master)
+        os.close(slave)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('binary')
@@ -193,3 +219,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     run(args.binary, True, args.output, args.fixture)
     run(args.binary, False, args.output, args.fixture)
+    if args.fixture: check_sample_error(args.binary)

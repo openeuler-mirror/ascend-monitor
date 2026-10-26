@@ -4,12 +4,11 @@
 #include "top/Tui.h"
 #include "top/Graph.h"
 #include "top/ProcessTable.h"
+#include "top/SampleRound.h"
 #include <clocale>
 #include <cwchar>
 #include <langinfo.h>
 #include <cctype>
-#include "top/Dcmi.h"
-#include "top/Proc.h"
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -25,13 +24,24 @@
 namespace ascend {
 Sampler::Sampler(double interval) : history_(interval), inspection_(interval) {
     worker_ = std::thread([this, interval] {
-        Dcmi dcmi; ProcReader proc;
+        SampleRound sampling;
         while (true) {
             auto start = Clock::now(); auto s = std::make_shared<Snapshot>();
-            try { dcmi.collect(*s); proc.collect(*s); }
-            catch (const std::exception& e) { s->error = e.what(); }
-            s->sampled = Clock::now(); s->wall = std::chrono::system_clock::now();
-            s->collectionSeconds = std::chrono::duration<double>(s->sampled - start).count();
+            bool threw = false;
+            try { *s = sampling.collect(); }
+            catch (const SampleRoundError& e) {
+                *s = e.partial();
+                s->error = e.what();
+                threw = true;
+            }
+            catch (const std::exception& e) {
+                s->error = e.what();
+                threw = true;
+            }
+            if (threw) {
+                s->sampled = Clock::now(); s->wall = std::chrono::system_clock::now();
+                s->collectionSeconds = std::chrono::duration<double>(s->sampled - start).count();
+            }
             std::unique_lock<std::mutex> lock(mutex_); latest_ = s; history_.append(*s); inspection_.append(*s);
             // Missed deadlines never cause back-to-back catch-up queries.
             auto delay = std::max(0.05, std::min(0.5, interval / 2.0) - s->collectionSeconds);
