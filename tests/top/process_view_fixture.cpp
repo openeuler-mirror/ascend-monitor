@@ -4,12 +4,19 @@
 #include "top/Proc.h"
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <stdexcept>
+#include <thread>
 namespace ascend {
 struct Dcmi::Impl {};
 Dcmi::Dcmi() : impl_(std::make_unique<Impl>()) {}
 Dcmi::~Dcmi() = default;
 void Dcmi::collect(Snapshot& s) {
+    if (auto path = std::getenv("ASCEND_TEST_SAMPLE_LOG")) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::ofstream(path, std::ios::app) << std::fixed << std::setprecision(9)
+            << std::chrono::duration<double>(Clock::now().time_since_epoch()).count() << '\n';
+    }
     std::string phase;
     if (auto path = std::getenv("ASCEND_TEST_PHASE_FILE")) std::ifstream(path) >> phase;
     s.host.user = "tester"; s.host.hostname = "fixture";

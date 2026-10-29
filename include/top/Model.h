@@ -1,7 +1,5 @@
 #pragma once
 #include <chrono>
-#include <array>
-#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -49,36 +47,14 @@ struct Snapshot {
 };
 struct Aggregate { Value memory, core; size_t memoryCount = 0, coreCount = 0, total = 0; };
 Aggregate aggregate(const Snapshot& snapshot);
-struct HistoryPoint { Clock::time_point time; Value cpu, memory, swap, npuMemory, npuCore; Clock::time_point plotTime; };
+struct HistoryPoint { Clock::time_point time; Value cpu, memory, swap, npuMemory, npuCore; };
 class History {
 public:
-    explicit History(double interval = 1.0) : interval_(interval) {}
     void append(const Snapshot& snapshot);
     void appendPoint(HistoryPoint point);
     const std::deque<HistoryPoint>& points() const { return points_; }
 private:
     std::deque<HistoryPoint> points_;
-    double interval_;
-    std::optional<Clock::time_point> origin_;
-    int64_t lastTick_ = -1;
-};
-// Finalize fixed time buckets once; never revise an already displayed average.
-class BufferedHistory {
-public:
-    explicit BufferedHistory(double interval = 1.0) : history_(interval),
-        period_(std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval))) {}
-    void append(const Snapshot& snapshot);
-    // Same fixed buckets, with caller-supplied values in HistoryPoint field order.
-    void appendValues(Clock::time_point time, const std::array<Value, 5>& values);
-    const History& history() const { return history_; }
-private:
-    History history_;
-    Clock::duration period_;
-    std::optional<Clock::time_point> origin_, last_;
-    int64_t bucket_ = 0;
-    size_t count_ = 0;
-    std::array<double, 5> sums_{};
-    std::array<bool, 5> missing_{};
 };
 std::string number(Value value, int precision = 1, const std::string& suffix = "");
 std::string bytes(Value value);

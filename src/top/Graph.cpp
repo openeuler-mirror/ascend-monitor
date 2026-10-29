@@ -7,23 +7,45 @@ std::vector<Value> historyColumns(const History& history, Value HistoryPoint::*m
     int count, double secondsPerColumn, Clock::time_point end) {
     if (count <= 0 || secondsPerColumn <= 0) return {};
     std::vector<Value> columns(static_cast<size_t>(count));
+    // A process-wide steady-clock lattice keeps an old column's timestamp
+    // fixed while the visible window scrolls in whole columns.
+    auto slotOf = [&](Clock::time_point time) {
+        return std::llround(std::chrono::duration<double>(time.time_since_epoch()).count()
+                            / secondsPerColumn);
+    };
+    const auto endSlot = slotOf(end);
+    auto columnOf = [&](const HistoryPoint& point) {
+        return static_cast<long long>(count) - 1 - (endSlot - slotOf(point.time));
+    };
+    // Place completed snapshots first so interpolation never changes a measured peak.
+    for (const auto& point : history.points()) {
+        if (point.time > end) break;
+        auto col = columnOf(point);
+        if (col >= 0 && col < count) columns[col] = point.*member;
+    }
+    // Connect normal collection delays only. Missing readings and long stalls
+    // remain gaps; recorded samples in History are never modified.
+    const double maxGap = secondsPerColumn + std::max(2.0, secondsPerColumn * 0.5);
     const auto& points = history.points();
-    if (points.empty()) return columns;
-    // Anchor on immutable sample slots, not the latest acquisition's jitter.
-    auto last = std::find_if(points.rbegin(), points.rend(),
-        [end](const HistoryPoint& point) { return point.time <= end; });
-    if (last == points.rend()) return columns;
-    auto plotEnd = last->plotTime;
-    // Hold at most two periods across short delays; retain real outage gaps.
-    size_t next = 0;
-    const HistoryPoint* previous = nullptr;
-    auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(secondsPerColumn));
-    for (int col = 0; col < count; ++col) {
-        auto time = plotEnd - period * (count - 1 - col);
-        while (next < points.size() && points[next].plotTime <= time) previous = &points[next++];
-        if (!previous) continue;
-        double age = std::chrono::duration<double>(time - previous->plotTime).count();
-        if (age <= secondsPerColumn * 2.0) columns[col] = previous->*member;
+    for (size_t i = 1; i < points.size(); ++i) {
+        const auto& older = points[i - 1];
+        const auto& newer = points[i];
+        if (newer.time > end) break;
+        const auto& from = older.*member;
+        const auto& to = newer.*member;
+        if (!from || !to || !std::isfinite(*from) || !std::isfinite(*to)) continue;
+        double gap = std::chrono::duration<double>(newer.time - older.time).count();
+        if (gap <= 0 || gap > maxGap) continue;
+        auto first = std::max(0LL, columnOf(older) + 1);
+        auto last = std::min(static_cast<long long>(count), columnOf(newer));
+        for (auto col = first; col < last; ++col) {
+            if (columns[col]) continue;
+            auto slot = endSlot - (count - 1 - col);
+            auto at = Clock::time_point{} + std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(slot * secondsPerColumn));
+            double fraction = std::clamp(std::chrono::duration<double>(at - older.time).count() / gap, 0.0, 1.0);
+            columns[col] = *from + (*to - *from) * fraction;
+        }
     }
     return columns;
 }

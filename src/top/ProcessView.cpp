@@ -36,7 +36,7 @@ std::set<std::pair<int, int>> processDevices(const Snapshot& s, const ProcessIde
 }
 void ProcessInspection::target(std::optional<ProcessIdentity> identity) {
     if (identity_ == identity) return;
-    identity_ = identity; current_ = {}; history_ = BufferedHistory(interval_);
+    identity_ = identity; current_ = {}; history_ = History{};
 }
 void ProcessInspection::append(const Snapshot& s) {
     if (!identity_ || s.sampled <= current_.sampled) return;
@@ -65,6 +65,6 @@ void ProcessInspection::append(const Snapshot& s) {
         if (complete && !unknownIdentity && validNpu) next.npuBytes = npu;
     } else next.state = complete && !unknownIdentity ? ProcessState::Exited : ProcessState::Unavailable;
     current_ = std::move(next);
-    history_.appendValues(s.sampled, {current_.cpu, current_.hostBytes, {}, current_.npuBytes, {}});
+    history_.appendPoint({s.sampled, current_.cpu, current_.hostBytes, {}, current_.npuBytes, {}});
 }
 }

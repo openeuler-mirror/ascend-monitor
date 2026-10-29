@@ -36,22 +36,24 @@ int main() {
         selection.reconcile(rows); check(!selection.identity(), "PID reuse clears selection");
         s.processes[0].startTicks = 1000;
         p = s.processes[0]; p.chip = 1; p.npuBytes = 30; s.processes.push_back(p);
-        ProcessInspection view(1); view.target(ProcessIdentity{100, 1000}); view.append(s);
+        ProcessInspection view; view.target(ProcessIdentity{100, 1000}); view.append(s);
         near(view.current().npuBytes, 40); near(view.current().cpu, 250); near(view.current().hostBytes, 80);
-        check(view.current().devices.size() == 2 && view.history().points().empty(), "first unfinished bucket has no invented history");
+        check(view.current().devices.size() == 2 && view.history().points().size() == 1,
+              "first completed snapshot appears immediately in history");
         s.sampled = base + std::chrono::milliseconds(500); s.processes[0].cpu = 350; view.append(s);
         view.append(s); // Repeated renders must not duplicate samples.
         s.sampled = base + std::chrono::seconds(1); view.append(s);
-        near(view.history().points().back().cpu, 300);
+        near(view.history().points().back().cpu, 350);
         near(view.history().points().back().npuMemory, 40);
         near(view.history().points().back().memory, 80);
-        view.target(ProcessIdentity{100, 1000}); check(view.history().points().size() == 1, "same target preserves history");
+        view.target(ProcessIdentity{100, 1000}); check(view.history().points().size() == 3, "same target preserves history");
         s.devices[1].processesAvailable = false;
         s.sampled += std::chrono::seconds(1); view.append(s);
         check(!view.current().npuBytes && view.current().cpu, "partial NPU data not presented as complete total");
         s.devices[1].processesAvailable = true;
         s.sampled += std::chrono::seconds(1); view.append(s);
-        check(!view.history().points().back().npuMemory, "partial-data window is a gap");
+        check(!view.history().points()[3].npuMemory && view.history().points().back().npuMemory == Value(40),
+              "partial-data snapshot is missing without hiding the next valid reading");
         for (auto& proc : s.processes) if (proc.pid == 100) proc.startTicks.reset();
         s.sampled += std::chrono::seconds(1); view.append(s);
         check(view.current().state == ProcessState::Unavailable && !view.current().cpu && !view.current().npuBytes,

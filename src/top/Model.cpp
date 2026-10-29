@@ -22,45 +22,12 @@ Aggregate aggregate(const Snapshot& s) {
 }
 void History::append(const Snapshot& s) {
     auto a = aggregate(s);
-    appendPoint({s.sampled, s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core, {}});
+    appendPoint({s.sampled, s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core});
 }
 void History::appendPoint(HistoryPoint point) {
     if (!points_.empty() && point.time <= points_.back().time) return;
-    if (!origin_) origin_ = point.time;
-    auto elapsed = std::chrono::duration<double>(point.time - *origin_).count();
-    auto tick = std::max(lastTick_ + 1, static_cast<int64_t>(std::llround(elapsed / interval_)));
-    auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval_));
-    point.plotTime = *origin_ + period * tick;
-    lastTick_ = tick;
     points_.push_back(point);
     while (!points_.empty() && point.time - points_.front().time > std::chrono::seconds(600)) points_.pop_front();
-}
-void BufferedHistory::append(const Snapshot& s) {
-    auto a = aggregate(s);
-    appendValues(s.sampled, {s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core});
-}
-void BufferedHistory::appendValues(Clock::time_point time, const std::array<Value, 5>& values) {
-    if (last_ && time <= *last_) return;
-    last_ = time;
-    if (!origin_) origin_ = time;
-    int64_t next = (time - *origin_) / period_;
-    if (next > bucket_) {
-        std::array<Value, 5> values{};
-        for (size_t i = 0; i < values.size(); ++i)
-            if (count_ && !missing_[i]) values[i] = sums_[i] / count_;
-        history_.appendPoint({*origin_ + period_ * (bucket_ + 1),
-            values[0], values[1], values[2], values[3], values[4], {}});
-        // Explicit empty buckets preserve outages without interpolating readings.
-        int64_t retained = std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(600)) / period_;
-        for (int64_t gap = std::max(bucket_ + 1, next - retained); gap < next; ++gap)
-            history_.appendPoint({*origin_ + period_ * (gap + 1), {}, {}, {}, {}, {}, {}});
-        bucket_ = next; count_ = 0; sums_.fill(0); missing_.fill(false);
-    }
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (values[i] && std::isfinite(*values[i])) sums_[i] += *values[i];
-        else missing_[i] = true;
-    }
-    ++count_;
 }
 std::string number(Value v, int precision, const std::string& suffix) {
     if (!v || !std::isfinite(*v)) return "N/A";
