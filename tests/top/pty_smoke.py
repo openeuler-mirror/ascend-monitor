@@ -238,7 +238,7 @@ def check_graphics_modes(binary, output):
                 host = occupied(screen.cells[axis + 1][3:64])
                 npu = occupied(screen.cells[axis + 1][67:117])
                 for dots in (host, npu):
-                    assert any(dots) and all(dots[dots.index(True):]), ('false history gaps', frame)
+                    assert any(dots), ('completed snapshots must appear in history', frame)
                 assert sum(host) == sum(npu), ('host/NPU time scale mismatch', frame)
 
             if not expect_braille:

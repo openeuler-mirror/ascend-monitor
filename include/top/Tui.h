@@ -21,7 +21,7 @@ private:
     bool stop_ = false;
     std::thread worker_;
     std::shared_ptr<const Snapshot> latest_;
-    BufferedHistory history_;
+    History history_;
     ProcessInspection inspection_;
 };
 int runTui(double interval, bool ascii = false);

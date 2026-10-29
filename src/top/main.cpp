@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
             std::cout << "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION " - local Ascend NPU monitor\n"
                 "Usage: ascend-monitor-tui [--interval SECONDS] [--json] [--ascii]\n"
                 "  --json       Two samples, emit one JSON snapshot (CPU needs a delta)\n"
-                "  --interval   History/JSON interval, 0.2 to 60 seconds (default 1)\n"
+                "  --interval   Wait after each collection, 0.2 to 60 seconds (default 1)\n"
                 "  --ascii      Use ASCII graphics instead of Unicode Braille\n"
                 "  --version    Show version\n"
                 "Keys: h help, q quit, Tab focus, arrows/PageUp/PageDown scroll.\n"

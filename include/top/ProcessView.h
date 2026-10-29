@@ -35,17 +35,15 @@ struct ProcessMetrics {
 // History fields: cpu = CPU %, memory = RSS bytes, npuMemory = summed NPU bytes.
 class ProcessInspection {
 public:
-    explicit ProcessInspection(double interval = 1) : interval_(interval), history_(interval) {}
     void target(std::optional<ProcessIdentity> identity);
     void append(const Snapshot& snapshot);
     std::optional<ProcessIdentity> identity() const { return identity_; }
     const ProcessMetrics& current() const { return current_; }
-    const History& history() const { return history_.history(); }
+    const History& history() const { return history_; }
 private:
-    double interval_;
     std::optional<ProcessIdentity> identity_;
     ProcessMetrics current_;
-    BufferedHistory history_;
+    History history_;
 };
 std::set<std::pair<int, int>> processDevices(const Snapshot& snapshot, const ProcessIdentity& identity);
 }

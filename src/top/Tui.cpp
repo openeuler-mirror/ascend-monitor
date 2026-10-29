@@ -22,7 +22,7 @@
 #define ASCEND_MONITOR_TUI_VERSION "dev"
 #endif
 namespace ascend {
-Sampler::Sampler(double interval) : history_(interval), inspection_(interval) {
+Sampler::Sampler(double interval) {
     worker_ = std::thread([this, interval] {
         SampleRound sampling;
         while (true) {
@@ -43,15 +43,14 @@ Sampler::Sampler(double interval) : history_(interval), inspection_(interval) {
                 s->collectionSeconds = std::chrono::duration<double>(s->sampled - start).count();
             }
             std::unique_lock<std::mutex> lock(mutex_); latest_ = s; history_.append(*s); inspection_.append(*s);
-            // Missed deadlines never cause back-to-back catch-up queries.
-            auto delay = std::max(0.05, std::min(0.5, interval / 2.0) - s->collectionSeconds);
-            if (wake_.wait_for(lock, std::chrono::duration<double>(delay), [this] { return stop_; })) break;
+            // Wait after collection completes; slow calls never trigger catch-up queries.
+            if (wake_.wait_for(lock, std::chrono::duration<double>(interval), [this] { return stop_; })) break;
         }
     });
 }
 Sampler::~Sampler() { { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; } wake_.notify_all(); worker_.join(); }
 std::shared_ptr<const Snapshot> Sampler::latest() { std::lock_guard<std::mutex> lock(mutex_); return latest_; }
-History Sampler::history() { std::lock_guard<std::mutex> lock(mutex_); return history_.history(); }
+History Sampler::history() { std::lock_guard<std::mutex> lock(mutex_); return history_; }
 void Sampler::inspect(std::optional<ProcessIdentity> identity) {
     std::lock_guard<std::mutex> lock(mutex_);
     inspection_.target(identity);
@@ -85,6 +84,9 @@ static void text(int y, int x, const std::string& s, int color = 0, int maxWidth
 static std::string fit(const std::string& s, size_t n) { if (s.size() > n) return s.substr(0, n - 1) + "~"; return s + std::string(n - s.size(), ' '); }
 static std::string deviceId(std::optional<unsigned> v) { return v ? std::to_string(*v) : "N/A"; }
 static int severity(Value v) { return !v ? 0 : *v >= 80 ? 3 : *v >= 50 ? 2 : 1; }
+static double staleAfter(double interval, double collectionSeconds) {
+    return std::max(3.0, interval + collectionSeconds + 1.0);
+}
 static void rule(int y, int x, int width) { if (y >= 0 && y < LINES && width > 0) mvhline(y, x, lineGlyph(ACS_HLINE), std::min(width, COLS - x - 1)); }
 static void bar(int y, int x, int width, const std::string& label, Value v) {
     if (width < 15) return; text(y, x, label, severity(v));
@@ -220,11 +222,11 @@ static std::vector<HelpLine> helpLines(int page, int width) {
         entry("Process details", "NPU Memory sums chips. CPU Usage and Host Memory (RSS) are counted once.");
         entry("Selection identity", "PID plus starttime. Unverified process identities cannot be selected.");
         section("HISTORY & DATA QUALITY");
-        entry("History", "Process history starts at selection; keeps the last 600 seconds. Resize preserves history.");
+        entry("History", "Fixed time slots keep old points horizontally stable. Process history starts at selection, keeps 600s, and survives resize.");
         entry("Y-axis", "Vertical range of each detail chart; automatically scales to current and retained readings.");
-        entry("Sampling", "Default collection target is 0.5s; one completed average per interval (default 1s).");
-        entry("Missing data", "Missing readings/windows stay blank. Finalized averages do not change; no interpolation.");
-        entry("STALE", "No new snapshot for more than 3 seconds. Driver errors are shown; collection is local.");
+        entry("Sampling", "Wait --interval seconds after each completed sample (default 1s); plot every snapshot.");
+        entry("Missing data", "Short gaps between valid samples are interpolated for display; missing readings and long stalls stay blank.");
+        entry("STALE", "No new snapshot beyond the expected interval. Driver errors are shown; collection is local.");
     }
     return lines;
 }
@@ -315,9 +317,10 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     };
     tableRule(1, {left, right}, true);
     double age = std::chrono::duration<double>(now - s.sampled).count();
+    bool stale = age > staleAfter(interval, s.collectionSeconds);
     text(2, left + 2, "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "    Driver: " + s.driver + "    CANN: " + s.cann
         + "    sample " + number(s.collectionSeconds, 2, "s")
-        + (age > 3 ? "  STALE " + number(age, 0, "s") : ""), age > 3 ? 3 : 0, right - left - 3);
+        + (stale ? "  STALE " + number(age, 0, "s") : ""), stale ? 3 : 0, right - left - 3);
     vertical(2, left, 1); vertical(2, right, 1);
     tableRule(3, columns);
     for (size_t i = 1; i + 1 < columns.size(); ++i) mvaddch(3, columns[i], lineGlyph(ACS_TTEE));
@@ -480,10 +483,11 @@ static void drawProcessDetails(const ProcessInspection& inspection, const Snapsh
     }
     text(3, 1, devices);
     double age = std::chrono::duration<double>(Clock::now() - snapshot.sampled).count();
+    bool stale = age > staleAfter(interval, snapshot.collectionSeconds);
     auto status = current.state == ProcessState::Available ? "LIVE" : current.state == ProcessState::Exited
         ? "Process exited or released all NPUs" : "Process data unavailable";
-    text(4, 1, std::string(status) + (age > 3 ? " | STALE " + number(age, 0, "s") : ""),
-        current.state != ProcessState::Available || age > 3 ? 2 : 0);
+    text(4, 1, std::string(status) + (stale ? " | STALE " + number(age, 0, "s") : ""),
+        current.state != ProcessState::Available || stale ? 2 : 0);
     text(5, 1, "History since selection; last 600s. NPU memory sums chips; CPU / RSS counted once.");
     const int graphHeight = std::max(2, (LINES - 9) / 3 - 2);
     const auto& history = inspection.history();
