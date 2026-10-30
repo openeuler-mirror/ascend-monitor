@@ -112,6 +112,12 @@ def run(binary, ascii_only, output=None, fixture=False):
             while not entries() and time.monotonic() < deadline:
                 drain(.2)
             assert len(entries()) >= 2, screen.text()
+            if fixture:
+                # The process header must leave room for data after each resize.
+                for height in (24, 27, 28, 31, 34, 45, 47, 50, 51):
+                    resize(height, 120)
+                    assert 'Processes:' in screen.text() and entries(), (height, screen.text())
+                resize(55, 120)
             assert not selected() and not any(dim for _, dim in device_styles())
             baseline_colors = colors()
             first_pid = entries()[0][2]

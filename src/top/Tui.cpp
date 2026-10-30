@@ -337,8 +337,10 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
 
     int plotHeight = LINES >= 45 ? 3 : 1;
     int historyHeight = 5 + 2 * plotHeight;
-    // Reserve the bordered process header and at least one process row.
-    int visible = std::max(1, std::min(static_cast<int>(s.devices.size()), (LINES - 15 - historyHeight) / 3));
+    // Fixed rows outside the devices/history panels: 13 compact, 15 regular.
+    // Reserve one more row so the bordered process table has data space.
+    const int reserved = compact ? 14 : 16;
+    int visible = std::max(1, std::min(static_cast<int>(s.devices.size()), (LINES - reserved - historyHeight) / 3));
     deviceOffset = std::clamp(deviceOffset, 0, std::max(0, static_cast<int>(s.devices.size()) - visible));
     int y = compact ? 6 : 7;
     auto linked = selection.identity() ? processDevices(s, *selection.identity()) : std::set<std::pair<int, int>>{};
