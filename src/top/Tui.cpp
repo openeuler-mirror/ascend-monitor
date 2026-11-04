@@ -193,13 +193,16 @@ static std::vector<HelpLine> helpLines(int page, int width) {
         entry("Click outside rows", "Clear selection, except when clicking a sort header.");
         entry("Enter", "Open process details; press Enter again to return to the list.");
         entry("Linked NPUs", "Keep their normal colors; other NPUs fade in their original colors.");
+        section("PROCESS SEARCH");
+        entry("f", "Type a literal keyword to highlight matching command, user or PID rows. ASCII case-insensitive; all rows remain visible.");
+        entry("Enter / Esc", "Keep highlights / clear search. While typing, shortcuts become text; Backspace deletes and Ctrl-U clears input.");
         section("SORTING");
         entry("Click sort header", "Sort by NPU-MEM, %MEM or %CPU; click again to reverse.");
         entry("s / S", "Cycle NPU memory, host memory and CPU; start in descending order.");
         entry("/", "Reverse the current sort direction.");
         entry("Direction marker", "Down = descending, up = ascending (ASCII: v / ^). Missing values last.");
         section("BACK & EXIT");
-        entry("Esc", "Close help/details; on the main screen, clear selection before quitting.");
+        entry("Esc", "Close help/details; on the main screen, clear search, then selection, before quitting.");
         entry("q", "Return from help/details; quit from the main screen.");
         entry("h / ?", "Open or close help. Sampling continues while help is open.");
     } else {
@@ -295,7 +298,8 @@ static void tableRule(int y, const std::vector<int>& columns, bool top = false, 
     }
 }
 static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double interval,
-                 const ProcessSort& sort, ProcessHeader& processHeader, ProcessRows& processRows, const ProcessSelection& selection) {
+                 const ProcessSort& sort, ProcessHeader& processHeader, ProcessRows& processRows, const ProcessSelection& selection,
+                 const std::string& query) {
     erase();
     const int left = 1, right = COLS - 2;
     auto now = Clock::now();
@@ -409,7 +413,7 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     const int processTop = y;
     tableRule(y++, {left, right}, true);
     text(y, left + 2, std::string(!deviceFocus ? "> " : "") + "Processes:" + (compact && s.host.root ? " [root]" : "")
-        + "  [click header / s: sort]");
+        + "  [s: sort / f: find]");
     auto identity = s.host.user + "@" + s.host.hostname;
     if (selection.identity()) text(y, left + 42, "PID " + std::to_string(selection.identity()->pid) + " [Enter]", 0,
         std::max(0, right - static_cast<int>(identity.size()) - left - 45));
@@ -445,11 +449,13 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
         const auto line = fit(deviceId(p.physical), 5) + fit(std::to_string(p.pid), 9) + fit(p.user, 10)
             + fit(bytes(p.npuBytes), 12) + fit(number(p.cpu), 7) + fit(number(p.memoryPercent), 7)
             + fit(duration(p.elapsed), 10) + command;
-        if (selected && static_cast<size_t>(i) == *selected) {
-            attrset(A_REVERSE);
-            mvaddnstr(y++, left + 2, fit(line, static_cast<size_t>(right - left - 3)).c_str(), right - left - 3);
-            attrset(A_NORMAL);
-        } else text(y++, left + 2, line, 0, right - left - 3);
+        const bool match = processMatches(p, query);
+        const bool isSelected = selected && static_cast<size_t>(i) == *selected;
+        attrset((match ? COLOR_PAIR(2) | A_BOLD : A_NORMAL)
+            | (isSelected ? A_REVERSE : A_NORMAL));
+        const auto rendered = match || isSelected ? fit(line, static_cast<size_t>(right - left - 3)) : line;
+        mvaddnstr(y++, left + 2, safeText(rendered).c_str(), right - left - 3);
+        attrset(A_NORMAL);
     }
     if (s.processes.empty() && rows) {
         bool all = !s.devices.empty() && std::all_of(s.devices.begin(), s.devices.end(), [](const Device& d) { return d.processesAvailable; });
@@ -533,7 +539,8 @@ int runTui(double interval, bool ascii) {
         Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0;
         bool deviceFocus = false, showHelp = false, showDetails = false;
         ProcessSort sort; ProcessHeader processHeader; ProcessRows processRows; ProcessSelection selection; HelpState helpState;
-        std::string notice;
+        std::string notice, query;
+        bool searching = false;
         while (!interrupted) {
             processHeader = {}; processRows = {};
             auto s = sampler.latest();
@@ -545,11 +552,45 @@ int runTui(double interval, bool ascii) {
             else if (s && showDetails) drawProcessDetails(sampler.inspection(), *s, interval);
             else if (s) {
                 draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval,
-                    sort, processHeader, processRows, selection);
+                    sort, processHeader, processRows, selection, query);
                 if (!notice.empty()) text(LINES - 1, 1, notice, 2);
             } else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
+            if (!showHelp && !showDetails && (searching || !query.empty())) {
+                const auto matches = std::count_if(rows.begin(), rows.end(), [&](const Process* p) { return processMatches(*p, query); });
+                const auto suffix = " | " + std::to_string(matches) + " matching rows | "
+                    + (searching ? "Enter: keep  Esc: clear" : "f: edit  Esc: clear");
+                // Keep the end of a long query and the status visible, even on resize.
+                const size_t width = static_cast<size_t>(std::max(0, COLS - 9 - static_cast<int>(suffix.size())));
+                size_t start = query.size() > width ? query.size() - width : 0;
+                while (start < query.size() && (static_cast<unsigned char>(query[start]) & 0xc0) == 0x80) ++start;
+                move(LINES - 1, 0); clrtoeol();
+                text(LINES - 1, 1, "Find: " + query.substr(start) + (searching ? "_" : "") + suffix,
+                    !query.empty() && !matches ? 3 : 2);
+            }
             refresh(); int key = getch();
             MEVENT event{}; bool mouse = key == KEY_MOUSE && getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED);
+            if (searching) {
+                if (key == 27) { searching = false; query.clear(); continue; }
+                if (key == '\n' || key == '\r' || key == KEY_ENTER) { searching = false; continue; }
+                bool changed = false;
+                if ((key == KEY_BACKSPACE || key == 127 || key == 8) && !query.empty()) {
+                    size_t start = query.size() - 1;
+                    while (start > 0 && (static_cast<unsigned char>(query[start]) & 0xc0) == 0x80) --start;
+                    query.erase(start); changed = true;
+                } else if (key == 21) { changed = !query.empty(); query.clear(); }
+                else if (key >= 32 && key < 256 && key != 127 && query.size() < 256) {
+                    query += static_cast<char>(key); changed = true;
+                }
+                if (changed) {
+                    auto match = std::find_if(rows.begin(), rows.end(), [&](const Process* p) { return processMatches(*p, query); });
+                    if (match != rows.end()) {
+                        selection.clear(); selection.select(**match);
+                        processOffset = static_cast<int>(match - rows.begin());
+                        pan = 0;
+                    }
+                }
+                continue;
+            }
             if (showHelp) {
                 if (key == 'h' || key == '?' || key == 27 || key == 'q') showHelp = false;
                 else if (key == '1' || key == '2') helpState.select(key - '1');
@@ -575,8 +616,10 @@ int runTui(double interval, bool ascii) {
                 if (key == 'q' || key == 27 || key == '\n' || key == '\r' || key == KEY_ENTER) showDetails = false;
                 continue;
             }
+            if (key == 'f') { searching = true; deviceFocus = false; notice.clear(); continue; }
             if (key == 'q') break;
             if (key == 27) {
+                if (!query.empty()) { query.clear(); notice.clear(); continue; }
                 if (selection.identity()) { selection.clear(); notice.clear(); } else break;
                 continue;
             }

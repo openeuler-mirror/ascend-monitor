@@ -32,6 +32,7 @@ void Dcmi::collect(Snapshot& s) {
         p.pid = i == 1 ? 84 : 42; p.startTicks = i == 1 ? 8400 : (phase == "reuse" ? 4201 : 4200);
         if (phase == "unavailable" && p.pid == 42) p.startTicks.reset();
         p.user = "tester"; p.command = i == 1 ? "other worker" : "chosen worker --model test";
+        if (phase == "renamed" && p.pid == 42) p.command = "renamed worker";
         p.cpu = i == 1 ? 10 : 250; p.rssBytes = (i == 1 ? 1024.0 : 512.0) * 1024 * 1024;
         p.memoryPercent = i == 1 ? 10 : 5; p.elapsed = 360;
         p.npuBytes = (phase == "reorder" && i == 1 ? 900.0 : 100.0 * (i + 1)) * 1024 * 1024;

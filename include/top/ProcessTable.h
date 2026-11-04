@@ -26,4 +26,7 @@ struct ProcessHeader {
     std::optional<ProcessSortField> hit(int row, int column) const;
 };
 std::vector<const Process*> sortedProcesses(const Snapshot& snapshot, const ProcessSort& sort);
+// Literal substring search over PID, user and full command; ASCII case-insensitive.
+// An empty query has no highlighted matches.
+bool processMatches(const Process& process, const std::string& query);
 }
