@@ -4,6 +4,15 @@
 #include <tuple>
 
 namespace ascend {
+bool processMatches(const Process& process, const std::string& query) {
+    if (query.empty()) return false;
+    auto contains = [&](const std::string& value) {
+        auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+        return std::search(value.begin(), value.end(), query.begin(), query.end(),
+            [&](unsigned char a, unsigned char b) { return fold(a) == fold(b); }) != value.end();
+    };
+    return contains(std::to_string(process.pid)) || contains(process.user) || contains(process.command);
+}
 void ProcessSort::select(ProcessSortField selected) {
     descending = selected == field ? !descending : true;
     field = selected;
