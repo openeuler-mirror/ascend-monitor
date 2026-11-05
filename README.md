@@ -52,7 +52,7 @@ cpack --config build-rpm/CPackConfig.cmake -G RPM
 
 生成的 RPM 位于 [build-rpm](build-rpm) 目录下（GUI 包名为 `ascend-monitor`，启用 TUI 时另生成 `ascend-monitor-tui`）。
 
-### 远程打包与验证（10.40.125.244）
+### 远程打包与验证
 
 已支持通过免密 SSH 在远程环境打包和验证：
 
