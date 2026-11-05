@@ -160,7 +160,7 @@ def run(binary, output):
         assert initial.count('310P3') == 8, initial
         assert len(re.findall(r'Share (?:On|Off|N/A)', initial)) == 8, initial
         assert len(re.findall(r'Logic \d+', initial)) == 8, initial
-        assert 'NPU MEM:' in initial and 'NPU UTL:' in initial and 'VLLM' in initial, initial
+        assert 'NPU MEM:' in initial and 'NPU CORE:' in initial and 'VLLM' in initial, initial
         assert 'root@' in initial and 'N/A' in initial, initial
         assert any('\u2800' <= c <= '\u28ff' for c in initial) and '*' not in initial, initial
         assert '│' in initial and '┼' in initial and '┌' in initial, initial

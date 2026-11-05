@@ -27,6 +27,16 @@ void Dcmi::collect(Snapshot& s) {
         d.name = "TEST-NPU";
         d.memory = {(i == 0 ? 200.0 : i == 1 ? 600.0 : 950.0) * 1024 * 1024, 1024.0 * 1024 * 1024, "DDR"};
         d.core = 85; d.temperature = 40; d.processesAvailable = phase != "missing" || i != 1;
+        if (phase == "metrics") d.core = i == 2 ? 0 : 85;
+        if (phase == "metrics-missing") {
+            if (i != 1) d.memory.used.reset();
+            if (i != 0) d.core.reset();
+        }
+        if (phase == "metrics-thresholds") {
+            const double values[] = {49, 50, 80};
+            d.core = values[i];
+            d.memory.used = values[2 - i] * *d.memory.total / 100;
+        }
         s.devices.push_back(d);
         Process p; p.card = i; p.chip = 0; p.physical = i;
         p.pid = i == 1 ? 84 : 42; p.startTicks = i == 1 ? 8400 : (phase == "reuse" ? 4201 : 4200);

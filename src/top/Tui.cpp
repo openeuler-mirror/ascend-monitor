@@ -90,15 +90,16 @@ static double staleAfter(double interval, double collectionSeconds) {
 static void rule(int y, int x, int width) { if (y >= 0 && y < LINES && width > 0) mvhline(y, x, lineGlyph(ACS_HLINE), std::min(width, COLS - x - 1)); }
 static void bar(int y, int x, int width, const std::string& label, Value v) {
     if (width < 15) return; text(y, x, label, severity(v));
-    int w = width - 13;
+    const int labelWidth = std::max(5, static_cast<int>(label.size()) + 1);
+    int w = width - labelWidth - 8;
     int fill = v && *v > 0 ? std::max(1, static_cast<int>(std::clamp(*v, 0.0, 100.0) * w / 100)) : 0;
     // Faint applies to foreground glyphs reliably; reversed spaces color the background.
     const wchar_t block[] = {L'\u2588', 0};
     bool unicodeFill = !asciiGraphics && wcwidth(block[0]) == 1;
     attrset(textStyle(severity(v)));
     for (int i = 0; i < w; ++i) {
-        if (i < fill && unicodeFill) mvaddnwstr(y, x + 5 + i, block, 1);
-        else mvaddch(y, x + 5 + i, i < fill ? '#' : ' ');
+        if (i < fill && unicodeFill) mvaddnwstr(y, x + labelWidth + i, block, 1);
+        else mvaddch(y, x + labelWidth + i, i < fill ? '#' : ' ');
     }
     attrset(A_NORMAL);
     text(y, x + width - 7, number(v, 1, "%"), severity(v), 7);
@@ -316,8 +317,9 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     // Two lines per device, including on the side-by-side 120-column layout.
     const bool shortDeviceLabel = COLS < 100;
     const std::vector<int> columns{left, 21, 46, shortDeviceLabel ? 65 : 75, right};
-    auto cell = [&](int y, size_t col, const std::string& value, int color = 0) {
-        text(y, columns[col] + 2, value, color, columns[col + 1] - columns[col] - 3);
+    auto cell = [&](int y, size_t col, const std::string& value, int color = 0, int offset = 0) {
+        const int width = columns[col + 1] - columns[col] - 3 - offset;
+        if (width > 0) text(y, columns[col] + 2 + offset, value, color, width);
     };
     tableRule(1, {left, right}, true);
     double age = std::chrono::duration<double>(now - s.sampled).count();
@@ -349,20 +351,22 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     int y = compact ? 6 : 7;
     auto linked = selection.identity() ? processDevices(s, *selection.identity()) : std::set<std::pair<int, int>>{};
     for (int i = deviceOffset; i < std::min(deviceOffset + visible, static_cast<int>(s.devices.size())); ++i) {
-        const auto& d = s.devices[i]; int color = severity(d.memory.percent());
+        const auto& d = s.devices[i];
         mutedDevice = !linked.empty() && !linked.count({d.card, d.chip});
-        cell(y, 0, fit(deviceId(d.physical), 5) + d.name, color);
-        cell(y + 1, 0, fit(number(d.temperature, 0, "C"), 10) + number(d.power, 1, "W"), color);
-        cell(y, 1, d.pci + " " + d.memory.kind, color);
-        cell(y + 1, 1, bytes(d.memory.used) + " / " + bytes(d.memory.total), color);
+        cell(y, 0, fit(deviceId(d.physical), 5) + d.name);
+        cell(y + 1, 0, fit(number(d.temperature, 0, "C"), 10) + number(d.power, 1, "W"));
+        cell(y, 1, d.pci + " " + d.memory.kind);
+        cell(y + 1, 1, bytes(d.memory.used) + " / " + bytes(d.memory.total), severity(d.memory.percent()));
         const std::string endpoint = shortDeviceLabel
             ? std::to_string(d.card) + "/" + std::to_string(d.chip)
             : "Card " + std::to_string(d.card) + " / Chip " + std::to_string(d.chip);
         const std::string share = d.deviceShare ? (*d.deviceShare ? "On" : "Off") : "N/A";
-        cell(y, 2, endpoint + "  Share " + share, color);
-        cell(y + 1, 2, number(d.core, 0, "%") + "  Logic " + deviceId(d.logical), color);
+        cell(y, 2, endpoint + "  Share " + share);
+        const auto coreText = number(d.core, 0, "%");
+        cell(y + 1, 2, coreText, severity(d.core));
+        cell(y + 1, 2, "  Logic " + deviceId(d.logical), 0, static_cast<int>(coreText.size()));
         bar(y, columns[3] + 2, right - columns[3] - 3, "MEM:", d.memory.percent());
-        bar(y + 1, columns[3] + 2, right - columns[3] - 3, "UTL:", d.core);
+        bar(y + 1, columns[3] + 2, right - columns[3] - 3, "CORE:", d.core);
         mutedDevice = false;
         for (int x : columns) vertical(y, x, 2);
         tableRule(y + 2, columns);
@@ -401,7 +405,7 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     text(y, npuX, "NPU MEM: " + number(a.memory, 1, "%") + " (" + std::to_string(a.memoryCount) + "/" + std::to_string(a.total) + ")", 0, npuWidth);
     text(bottom - 1, hostX, "MEM: " + bytes(s.host.memory.used) + " (" + number(s.host.memory.percent(), 1, "%") + ") ", 0, hostWidth);
     text(bottom, hostX, "SWP: " + bytes(s.host.swap.used) + " (" + number(s.host.swap.percent(), 1, "%") + ") ", 0, hostWidth);
-    text(bottom, npuX, "NPU UTL: " + number(a.core, 1, "%") + " (" + std::to_string(a.coreCount) + "/" + std::to_string(a.total) + ") ", 0, npuWidth);
+    text(bottom, npuX, "NPU CORE: " + number(a.core, 1, "%") + " (" + std::to_string(a.coreCount) + "/" + std::to_string(a.total) + ") ", 0, npuWidth);
     for (int x : panels) vertical(y, x, historyHeight);
     mvaddch(y + 2 + plotHeight, left, lineGlyph(ACS_LTEE));
     mvaddch(y + 2 + plotHeight, split, lineGlyph(ACS_PLUS));

@@ -32,7 +32,7 @@ ascend-monitor-tui --help
 
 ## 界面和操作
 
-界面依次显示时间及版本、每芯片设备行与进度条、主机及 NPU 汇总历史、设备进程表。设备区采用带竖线的四组分栏：设备/温度/功耗、PCI/内存、Card/Chip、内存与 AI Core 进度条。90 列及以上均保持两行设备内容与进度条并排；历史区带外框及中间分隔线，进程区带独立边框。最低可用尺寸为 90 列 × 24 行，较矮窗口缩减表头并使用滚动保留可见数据。颜色沿用终端主题，进度条以 50% / 80% 为黄 / 红阈值。
+界面依次显示时间及版本、每芯片设备行与进度条、主机及 NPU 汇总历史、设备进程表。设备区采用带竖线的四组分栏：设备/温度/功耗、PCI/内存、Card/Chip、内存与 AI Core 进度条。90 列及以上均保持两行设备内容与进度条并排；历史区带外框及中间分隔线，进程区带独立边框。最低可用尺寸为 90 列 × 24 行，较矮窗口缩减表头并使用滚动保留可见数据。颜色沿用终端主题，内存与 AI Core 的数值和进度条分别按各自指标着色，以 50% / 80% 为黄 / 红阈值；不可用指标和设备身份信息使用默认色。温度、功耗使用默认色。设备区用 `CORE` 表示 AI Core 利用率，汇总区用 `NPU CORE` 表示可读芯片的平均 AI Core 利用率。
 
 | 按键 | 操作 |
 | --- | --- |
@@ -123,6 +123,13 @@ python3 tests/top/pty_process_view.py ./build-top/test_process_view_tui --fixtur
 
 ```sh
 python3 tests/top/pty_process_view.py ./build-top/ascend-monitor-tui --output /tmp/process-view-hardware
+```
+
+设备指标颜色与标签的 PTY 验收覆盖内存与 AI Core 独立着色、零值与缺失值、50% / 80% 阈值、进程选择淡化，以及 90/100/120/200 列布局。确定性数据用于验证高低负载组合，真实设备模式核对当前数值与进度条的颜色一致性：
+
+```sh
+python3 tests/top/pty_device_metrics.py ./build-top/test_process_view_tui --output /tmp/device-metrics-fixture
+python3 tests/top/pty_device_metrics.py ./build-top/ascend-monitor-tui --hardware --output /tmp/device-metrics-hardware
 ```
 
 帮助布局的独立 PTY 验收覆盖页签与鼠标点击、对齐和样式、长文本换行、90×24 滚动、宽屏居中、过小窗口恢复以及关闭帮助返回原界面：
