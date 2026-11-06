@@ -64,6 +64,33 @@ int main() {
               "history retains only the latest 600 seconds");
         check(historyColumns(History{}, &HistoryPoint::cpu, 8, 1.0, sample.sampled)
                   == std::vector<Value>(8), "empty history stays blank");
+        History variable;
+        Snapshot changing;
+        changing.sampled = origin;
+        changing.host.cpu = 10;
+        changing.waitSeconds = 1;
+        variable.append(changing);
+        changing.sampled += std::chrono::seconds(2);
+        changing.host.cpu = 90;
+        variable.append(changing);
+        auto old = historyColumns(variable, &HistoryPoint::cpu, 20, 1, changing.sampled);
+        changing.sampled += std::chrono::seconds(6);
+        changing.host.cpu = 20;
+        changing.waitSeconds = 5;
+        variable.append(changing);
+        auto slower = historyColumns(variable, &HistoryPoint::cpu, 20, 1, changing.sampled);
+        check(std::equal(old.begin() + 6, old.end(), slower.begin()),
+              "a changed wait preserves old values and the fixed time scale");
+        check(slower[17] && slower[18] && slower.back() == Value(20),
+              "normal slower sampling uses its recorded cadence to connect the gap");
+        changing.sampled += std::chrono::seconds(10);
+        changing.host.cpu = 40;
+        changing.waitSeconds = .2;
+        variable.append(changing);
+        auto stalled = historyColumns(variable, &HistoryPoint::cpu, 20, 1, changing.sampled);
+        check(!stalled[15] && !stalled[18] && stalled.back() == Value(40),
+              "a slow past cadence does not hide a new interruption after speeding up");
+        check(variable.points()[2].waitSeconds == Value(5), "cadence is retained with each historical round");
         std::cout << "Direct snapshot history, short-gap interpolation and outages passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -44,10 +44,16 @@ struct Snapshot {
     std::vector<Process> processes;
     std::string driver = "N/A", cann = "N/A", error;
     double collectionSeconds = 0;
+    // Configured wait preceding this round; absent for non-interactive collectors.
+    Value waitSeconds;
 };
 struct Aggregate { Value memory, core; size_t memoryCount = 0, coreCount = 0, total = 0; };
 Aggregate aggregate(const Snapshot& snapshot);
-struct HistoryPoint { Clock::time_point time; Value cpu, memory, swap, npuMemory, npuCore; };
+struct HistoryPoint {
+    Clock::time_point time;
+    Value cpu, memory, swap, npuMemory, npuCore;
+    Value waitSeconds;
+};
 class History {
 public:
     void append(const Snapshot& snapshot);

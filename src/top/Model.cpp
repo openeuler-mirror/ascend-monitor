@@ -22,7 +22,7 @@ Aggregate aggregate(const Snapshot& s) {
 }
 void History::append(const Snapshot& s) {
     auto a = aggregate(s);
-    appendPoint({s.sampled, s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core});
+    appendPoint({s.sampled, s.host.cpu, s.host.memory.percent(), s.host.swap.percent(), a.memory, a.core, s.waitSeconds});
 }
 void History::appendPoint(HistoryPoint point) {
     if (!points_.empty() && point.time <= points_.back().time) return;

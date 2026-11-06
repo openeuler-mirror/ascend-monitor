@@ -54,4 +54,11 @@ void ProcReader::collect(Snapshot&) {
     if (std::getenv("ASCEND_TEST_PROC_THROW")) throw std::runtime_error("/proc fixture failure");
 }
 }
-int main(int argc, char** argv) { return ascend::runTui(.2, argc > 1 && std::string(argv[1]) == "--ascii"); }
+int main(int argc, char** argv) {
+    double interval = .2; bool ascii = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--ascii") ascii = true;
+        else if (std::string(argv[i]) == "--interval" && i + 1 < argc) interval = std::stod(argv[++i]);
+    }
+    return ascend::runTui(interval, ascii);
+}

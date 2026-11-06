@@ -65,6 +65,6 @@ void ProcessInspection::append(const Snapshot& s) {
         if (complete && !unknownIdentity && validNpu) next.npuBytes = npu;
     } else next.state = complete && !unknownIdentity ? ProcessState::Exited : ProcessState::Unavailable;
     current_ = std::move(next);
-    history_.appendPoint({s.sampled, current_.cpu, current_.hostBytes, {}, current_.npuBytes, {}});
+    history_.appendPoint({s.sampled, current_.cpu, current_.hostBytes, {}, current_.npuBytes, {}, s.waitSeconds});
 }
 }

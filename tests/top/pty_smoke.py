@@ -79,6 +79,15 @@ class Screen:
                         start, end = (0, self.cols) if args[0] == 2 else ((0, self.x + 1) if args[0] == 1 else (self.x, self.cols))
                         self.cells[self.y][start:end] = [' '] * (end - start)
                     elif op == 'X': self.cells[self.y][self.x:self.x + n] = [' '] * min(n, self.cols - self.x)
+                    elif op in ('P', '@'):
+                        count = min(n, self.cols - self.x)
+                        row, styles = self.cells[self.y], self.attributes[self.y]
+                        if op == 'P':
+                            row[self.x:] = row[self.x + count:] + [' '] * count
+                            styles[self.x:] = styles[self.x + count:] + [0] * count
+                        else:
+                            row[self.x:] = [' '] * count + row[self.x:self.cols - count]
+                            styles[self.x:] = [0] * count + styles[self.x:self.cols - count]
                     elif op == 'b':
                         for _ in range(n): self.put(self.last)
                     elif op == 'r':

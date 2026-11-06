@@ -22,9 +22,10 @@
 #define ASCEND_MONITOR_TUI_VERSION "dev"
 #endif
 namespace ascend {
-Sampler::Sampler(double interval) {
+Sampler::Sampler(double interval) : interval_(interval) {
     worker_ = std::thread([this, interval] {
         SampleRound sampling;
+        double precedingWait = interval;
         while (true) {
             auto start = Clock::now(); auto s = std::make_shared<Snapshot>();
             bool threw = false;
@@ -42,21 +43,47 @@ Sampler::Sampler(double interval) {
                 s->sampled = Clock::now(); s->wall = std::chrono::system_clock::now();
                 s->collectionSeconds = std::chrono::duration<double>(s->sampled - start).count();
             }
+            s->waitSeconds = precedingWait;
             std::unique_lock<std::mutex> lock(mutex_); latest_ = s; history_.append(*s); inspection_.append(*s);
+            collecting_ = false;
+            expectCollection(s->sampled + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval_)));
             // Wait after collection completes; slow calls never trigger catch-up queries.
-            if (wake_.wait_for(lock, std::chrono::duration<double>(interval), [this] { return stop_; })) break;
+            while (!stop_) {
+                const auto deadline = s->sampled + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval_));
+                if (Clock::now() >= deadline) break;
+                wake_.wait_until(lock, deadline);
+            }
+            if (stop_) break;
+            precedingWait = interval_;
+            collecting_ = true;
+            expectCollection(Clock::now());
         }
     });
 }
 Sampler::~Sampler() { { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; } wake_.notify_all(); worker_.join(); }
-std::shared_ptr<const Snapshot> Sampler::latest() { std::lock_guard<std::mutex> lock(mutex_); return latest_; }
-History Sampler::history() { std::lock_guard<std::mutex> lock(mutex_); return history_; }
+void Sampler::expectCollection(Clock::time_point start) {
+    freshUntil_ = std::max(latest_->sampled + std::chrono::seconds(3), start
+        + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(latest_->collectionSeconds + 1.0)));
+}
+SamplerFrame Sampler::frame() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {latest_, history_, inspection_, latest_ && Clock::now() > freshUntil_};
+}
+void Sampler::setInterval(double interval) {
+    if (!std::isfinite(interval) || interval < .2 || interval > 60) throw std::invalid_argument("interval must be 0.2 to 60 seconds");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        interval_ = interval;
+        if (latest_ && !collecting_) expectCollection(std::max(Clock::now(), latest_->sampled
+            + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(interval_))));
+    }
+    wake_.notify_all();
+}
 void Sampler::inspect(std::optional<ProcessIdentity> identity) {
     std::lock_guard<std::mutex> lock(mutex_);
     inspection_.target(identity);
     if (latest_) inspection_.append(*latest_);
 }
-ProcessInspection Sampler::inspection() { std::lock_guard<std::mutex> lock(mutex_); return inspection_; }
 static bool asciiGraphics = false;
 static bool mutedDevice = false;
 static attr_t textStyle(int color) { return COLOR_PAIR(color) | (mutedDevice ? A_DIM : A_NORMAL); }
@@ -84,8 +111,38 @@ static void text(int y, int x, const std::string& s, int color = 0, int maxWidth
 static std::string fit(const std::string& s, size_t n) { if (s.size() > n) return s.substr(0, n - 1) + "~"; return s + std::string(n - s.size(), ' '); }
 static std::string deviceId(std::optional<unsigned> v) { return v ? std::to_string(*v) : "N/A"; }
 static int severity(Value v) { return !v ? 0 : *v >= 80 ? 3 : *v >= 50 ? 2 : 1; }
-static double staleAfter(double interval, double collectionSeconds) {
-    return std::max(3.0, interval + collectionSeconds + 1.0);
+static void toolbar(double interval, bool paused, const Snapshot* snapshot, bool details) {
+    auto wall = std::chrono::system_clock::to_time_t(paused && snapshot ? snapshot->wall : std::chrono::system_clock::now());
+    std::tm tm{}; localtime_r(&wall, &tm);
+    char date[80]{}; std::strftime(date, sizeof(date), "%a %b %d %H:%M:%S %Y", &tm);
+    std::string prefix = details ? "Process details" : date;
+    std::string state = paused ? "PAUSED" : "LIVE";
+    if (paused && snapshot) {
+        char at[20]{}; std::strftime(at, sizeof(at), " @%H:%M:%S", &tm); state += at;
+    }
+    auto value = number(interval, 9);
+    while (value.size() > 2 && value.back() == '0' && value[value.size() - 2] != '.') value.pop_back();
+    state += " wait " + value + "s";
+    if (interval <= .2) state += " [min]";
+    else if (interval >= 60) state += " [max]";
+    const std::string action = paused ? "resume" : "pause";
+    std::string hint = "+/- interval | Space " + action + (details ? " | Enter/Esc/q back | h help" : " | h help | q quit | Tab switch");
+    int x = 1 + static_cast<int>(prefix.size()) + 2;
+    int available = COLS - x - static_cast<int>(state.size()) - 4;
+    if (static_cast<int>(hint.size()) > available)
+        hint = "+/- | Space " + action + (details ? " | Esc back | h help" : " | h help | q quit");
+    if (static_cast<int>(hint.size()) > available) hint = "Space " + action + " | h help";
+    if (static_cast<int>(hint.size()) > available) hint = "Space " + action;
+    // Preserve state and pause control first, even with a custom fractional interval.
+    if (static_cast<int>(hint.size()) > available) {
+        prefix = details ? "Details" : std::string(date + 11, 8);
+        x = 1 + static_cast<int>(prefix.size()) + 2;
+    }
+    text(0, 1, prefix);
+    attrset(paused ? COLOR_PAIR(2) | A_BOLD : A_NORMAL);
+    if (x < COLS - 1) mvaddnstr(0, x, state.c_str(), COLS - x - 1);
+    attrset(A_NORMAL);
+    text(0, x + static_cast<int>(state.size()) + 2, hint);
 }
 static void rule(int y, int x, int width) { if (y >= 0 && y < LINES && width > 0) mvhline(y, x, lineGlyph(ACS_HLINE), std::min(width, COLS - x - 1)); }
 static void bar(int y, int x, int width, const std::string& label, Value v) {
@@ -189,6 +246,8 @@ static std::vector<HelpLine> helpLines(int page, int width) {
         entry("PgUp / PgDn", "Move one page in the focused list.");
         entry("Home / End", "Go to the first or last row.");
         entry("Left / Right", "Scroll a long process command horizontally.");
+        entry("+ / =, -", "Increase / decrease the post-collection wait by 0.1s (0.2-60s), in the list or details. Session only.");
+        entry("Space", "Freeze / resume displayed data. Background sampling continues; resume jumps to the latest snapshot.");
         section("PROCESS SELECTION");
         entry("Click process", "Select and follow a process across refreshes and sorting.");
         entry("Click outside rows", "Clear selection, except when clicking a sort header.");
@@ -226,9 +285,10 @@ static std::vector<HelpLine> helpLines(int page, int width) {
         entry("Process details", "NPU Memory sums chips. CPU Usage and Host Memory (RSS) are counted once.");
         entry("Selection identity", "PID plus starttime. Unverified process identities cannot be selected.");
         section("HISTORY & DATA QUALITY");
-        entry("History", "Fixed time slots keep old points horizontally stable. Process history starts at selection, keeps 600s, and survives resize.");
+        entry("History", "The startup interval fixes the time scale; runtime wait changes never zoom old history. Process history starts at selection and keeps 600s.");
         entry("Y-axis", "Vertical range of each detail chart; automatically scales to current and retained readings.");
-        entry("Sampling", "Wait --interval seconds after each completed sample (default 1s); plot every snapshot.");
+        entry("Sampling", "Wait after each completed sample (default 1s). +/- changes this wait by 0.1s; actual cadence also includes collection time.");
+        entry("PAUSED", "Displayed readings and plots are frozen at the shown time; sampling continues. Space resumes live data. Search treats +/- and Space as text.");
         entry("Missing data", "Short gaps between valid samples are interpolated for display; missing readings and long stalls stay blank.");
         entry("STALE", "No new snapshot beyond the expected interval. Driver errors are shown; collection is local.");
     }
@@ -298,17 +358,11 @@ static void tableRule(int y, const std::vector<int>& columns, bool top = false, 
         mvaddch(y, columns[i], lineGlyph(joint));
     }
 }
-static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double interval,
+static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double secondsPerColumn, bool stale,
                  const ProcessSort& sort, ProcessHeader& processHeader, ProcessRows& processRows, const ProcessSelection& selection,
                  const std::string& query) {
     erase();
     const int left = 1, right = COLS - 2;
-    auto now = Clock::now();
-    auto wall = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    char date[80]{}; std::tm tm{}; localtime_r(&wall, &tm);
-    std::strftime(date, sizeof(date), "%a %b %d %H:%M:%S %Y", &tm);
-    text(0, left, date);
-    text(0, std::max(33, COLS - 33), "h help | q quit | Tab switch");
     if (COLS < 90 || LINES < 24) {
         text(3, left, "Terminal too small: need 90 columns x 24 rows. Resize or press q.");
         return;
@@ -322,10 +376,9 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
         if (width > 0) text(y, columns[col] + 2 + offset, value, color, width);
     };
     tableRule(1, {left, right}, true);
-    double age = std::chrono::duration<double>(now - s.sampled).count();
-    bool stale = age > staleAfter(interval, s.collectionSeconds);
+    double age = std::chrono::duration<double>(Clock::now() - s.sampled).count();
     text(2, left + 2, "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "    Driver: " + s.driver + "    CANN: " + s.cann
-        + "    sample " + number(s.collectionSeconds, 2, "s")
+        + "    collect " + number(s.collectionSeconds, 2, "s")
         + (stale ? "  STALE " + number(age, 0, "s") : ""), stale ? 3 : 0, right - left - 3);
     vertical(2, left, 1); vertical(2, right, 1);
     tableRule(3, columns);
@@ -389,7 +442,6 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     auto a = aggregate(s);
     const auto graphTime = s.sampled;
     const int dotsPerCell = asciiGraphics ? 1 : 2;
-    const double secondsPerColumn = interval;
     const int upper = plotHeight + 2;
     const int lowerY = y + upper + 1;
     const int bottom = y + historyHeight - 1;
@@ -473,9 +525,8 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     tableRule(processBottom, {left, right}, false, true);
     if (!s.error.empty()) text(LINES - 1, left, s.error, 2);
 }
-static void drawProcessDetails(const ProcessInspection& inspection, const Snapshot& snapshot, double interval) {
+static void drawProcessDetails(const ProcessInspection& inspection, const Snapshot& snapshot, double secondsPerColumn, bool paused, bool stale) {
     erase();
-    text(0, 1, "Process details | Enter / Esc / q: back | h: help");
     if (COLS < 90 || LINES < 24) {
         text(3, 1, "Terminal too small: need 90 columns x 24 rows. Resize or press Esc.");
         return;
@@ -495,8 +546,7 @@ static void drawProcessDetails(const ProcessInspection& inspection, const Snapsh
     }
     text(3, 1, devices);
     double age = std::chrono::duration<double>(Clock::now() - snapshot.sampled).count();
-    bool stale = age > staleAfter(interval, snapshot.collectionSeconds);
-    auto status = current.state == ProcessState::Available ? "LIVE" : current.state == ProcessState::Exited
+    auto status = current.state == ProcessState::Available ? (paused ? "PAUSED" : "LIVE") : current.state == ProcessState::Exited
         ? "Process exited or released all NPUs" : "Process data unavailable";
     text(4, 1, std::string(status) + (stale ? " | STALE " + number(age, 0, "s") : ""),
         current.state != ProcessState::Available || stale ? 2 : 0);
@@ -516,9 +566,9 @@ static void drawProcessDetails(const ProcessInspection& inspection, const Snapsh
         if (member == &HistoryPoint::memory) reading += " (" + number(current.hostPercent, 1, "%") + ")";
         text(y++, 1, label + ": " + reading + "    Y-axis: 0 - "
             + (cpu ? number(maximum, 0, "%") : bytes(maximum)), color);
-        chart(y, 2, COLS - 4, graphHeight, history, member, interval, color, current.sampled, false, maximum);
+        chart(y, 2, COLS - 4, graphHeight, history, member, secondsPerColumn, color, current.sampled, false, maximum);
         y += graphHeight;
-        ticks(y++, 2, COLS - 4, (asciiGraphics ? 1 : 2) * interval);
+        ticks(y++, 2, COLS - 4, (asciiGraphics ? 1 : 2) * secondsPerColumn);
     };
     graph("NPU Memory", current.npuBytes, &HistoryPoint::npuMemory, 2, false);
     graph("CPU Usage", current.cpu, &HistoryPoint::cpu, 4, true);
@@ -541,24 +591,35 @@ int runTui(double interval, bool ascii) {
     interrupted = 0; auto oldInt = std::signal(SIGINT, stopSignal); auto oldTerm = std::signal(SIGTERM, stopSignal);
     {
         Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0;
+        const double secondsPerColumn = interval;
+        bool paused = false;
+        SamplerFrame frame;
         bool deviceFocus = false, showHelp = false, showDetails = false;
         ProcessSort sort; ProcessHeader processHeader; ProcessRows processRows; ProcessSelection selection; HelpState helpState;
         std::string notice, query;
         bool searching = false;
         while (!interrupted) {
             processHeader = {}; processRows = {};
-            auto s = sampler.latest();
+            if (!paused) frame = sampler.frame();
+            auto s = frame.snapshot;
             auto rows = s ? sortedProcesses(*s, sort) : std::vector<const Process*>{};
             if (!showDetails && s && s->error.empty() && std::all_of(s->devices.begin(), s->devices.end(),
                 [](const Device& d) { return d.processesAvailable; })) selection.reconcile(rows);
             sampler.inspect(selection.identity());
+            // A newly selected frozen process has only this frozen observation;
+            // never substitute newer telemetry into a paused details page.
+            if (frame.inspection.identity() != selection.identity()) {
+                frame.inspection.target(selection.identity());
+                if (s) frame.inspection.append(*s);
+            }
             if (showHelp) help(helpState);
-            else if (s && showDetails) drawProcessDetails(sampler.inspection(), *s, interval);
+            else if (s && showDetails) drawProcessDetails(frame.inspection, *s, secondsPerColumn, paused, !paused && frame.stale);
             else if (s) {
-                draw(*s, sampler.history(), deviceOffset, processOffset, deviceFocus, pan, interval,
+                draw(*s, frame.history, deviceOffset, processOffset, deviceFocus, pan, secondsPerColumn, !paused && frame.stale,
                     sort, processHeader, processRows, selection, query);
                 if (!notice.empty()) text(LINES - 1, 1, notice, 2);
             } else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
+            if (!showHelp) toolbar(interval, paused, s.get(), showDetails);
             if (!showHelp && !showDetails && (searching || !query.empty())) {
                 const auto matches = std::count_if(rows.begin(), rows.end(), [&](const Process* p) { return processMatches(*p, query); });
                 const auto suffix = " | " + std::to_string(matches) + " matching rows | "
@@ -616,6 +677,14 @@ int runTui(double interval, bool ascii) {
                 continue;
             }
             if (key == 'h' || key == '?') { showHelp = true; helpState = {}; continue; }
+            if (key == '+' || key == '=' || key == '-') {
+                // Round away binary floating-point drift without snapping a custom
+                // startup value such as 0.25s onto a different step grid.
+                interval = std::clamp(std::round((interval + (key == '-' ? -.1 : .1)) * 1e9) / 1e9, .2, 60.0);
+                sampler.setInterval(interval);
+                continue;
+            }
+            if (key == ' ') { paused = !paused; continue; }
             if (showDetails) {
                 if (key == 'q' || key == 27 || key == '\n' || key == '\r' || key == KEY_ENTER) showDetails = false;
                 continue;
