@@ -25,12 +25,14 @@ std::vector<Value> historyColumns(const History& history, Value HistoryPoint::*m
     }
     // Connect normal collection delays only. Missing readings and long stalls
     // remain gaps; recorded samples in History are never modified.
-    const double maxGap = secondsPerColumn + std::max(2.0, secondsPerColumn * 0.5);
     const auto& points = history.points();
     for (size_t i = 1; i < points.size(); ++i) {
         const auto& older = points[i - 1];
         const auto& newer = points[i];
         if (newer.time > end) break;
+        // Use the cadence recorded for this pair, never today's wait or zoom.
+        const double wait = newer.waitSeconds.value_or(secondsPerColumn);
+        const double maxGap = wait + std::max(2.0, wait * 0.5);
         const auto& from = older.*member;
         const auto& to = newer.*member;
         if (!from || !to || !std::isfinite(*from) || !std::isfinite(*to)) continue;
