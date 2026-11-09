@@ -55,7 +55,21 @@ def run(binary, ascii_only, output=None, hardware=False):
         def check(expected=None):
             lines = screen.text().splitlines()
             styles = {}
+            compact = 'Auto/Compact' in screen.text() or '  Compact [c]' in screen.text()
+            summary_row = next(y for y,line in enumerate(lines) if 'NPU MEM:' in line)
             for y, line in enumerate(lines):
+                if compact:
+                    if y >= summary_row or not line[3:8].strip().isdigit():
+                        continue
+                    npu = int(line[3:8].strip())
+                    memory_color, core_color = foreground(y, 23), foreground(y, 53)
+                    for x in (3, 8, 63, 75):
+                        assert foreground(y, x) == -1, ('compact metadata inherits metric color', line)
+                    assert screen.cells[y][cols - 2] in ('|', '│'), line
+                    if expected is not None:
+                        assert (memory_color, core_color) == expected[npu], (npu, memory_color, core_color, expected)
+                    styles[npu] = (memory_color, core_color)
+                    continue
                 if 'MEM:' not in line or not line[3:8].strip().isdigit():
                     continue
                 npu = int(line[3:8].strip())

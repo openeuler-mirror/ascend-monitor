@@ -2,6 +2,7 @@
 #include "top/Tui.h"
 #include "top/Dcmi.h"
 #include "top/Proc.h"
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -22,7 +23,9 @@ void Dcmi::collect(Snapshot& s) {
     s.host.user = "tester"; s.host.hostname = "fixture";
     s.host.cpu = 12; s.host.memory = {1024.0 * 1024 * 1024, 10.0 * 1024 * 1024 * 1024, ""};
     s.host.swap = {0, 0, ""};
-    for (int i = 0; i < 3; ++i) {
+    const auto count = std::getenv("ASCEND_TEST_DEVICE_COUNT");
+    const int deviceCount = count ? std::clamp(std::atoi(count), 0, 256) : 3;
+    for (int i = 0; i < deviceCount; ++i) {
         Device d; d.card = i; d.chip = 0; d.physical = i; d.logical = i;
         d.name = "TEST-NPU";
         d.memory = {(i == 0 ? 200.0 : i == 1 ? 600.0 : 950.0) * 1024 * 1024, 1024.0 * 1024 * 1024, "DDR"};
@@ -34,8 +37,8 @@ void Dcmi::collect(Snapshot& s) {
         }
         if (phase == "metrics-thresholds") {
             const double values[] = {49, 50, 80};
-            d.core = values[i];
-            d.memory.used = values[2 - i] * *d.memory.total / 100;
+            d.core = values[i % 3];
+            d.memory.used = values[2 - i % 3] * *d.memory.total / 100;
         }
         s.devices.push_back(d);
         Process p; p.card = i; p.chip = 0; p.physical = i;
