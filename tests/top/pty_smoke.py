@@ -193,8 +193,10 @@ def run(binary, output):
         send(b'h')
         size(24, 90); screen = Screen(24, 90); process.send_signal(signal.SIGWINCH); drain(1)
         assert 'NPU MEM:' in screen.text() and 'Processes:' in screen.text(), screen.text()
-        assert re.search(r'\d+/\d+  Share (?:On|Off|N/A)', screen.text()), screen.text()
-        assert re.search(r'Logic \d+', screen.text()) and 'MEM:' in screen.text(), screen.text()
+        assert 'Auto/Compact [c]' in screen.text() and 'NPUs 1-4/8' in screen.text(), screen.text()
+        assert 'CORE' in screen.text() and 'Power' in screen.text(), screen.text()
+        header = next(i for i,line in enumerate(screen.text().splitlines()) if 'NPU-MEM' in line)
+        assert 24 - (header + 2) - 2 >= 5, screen.text()
         send(b'\t\x1bOF')  # device focus and End, application cursor mode
         assert '7    310P3' in screen.text(), screen.text()
         send(b'\t\x1bOF\x1bOC')

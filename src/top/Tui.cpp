@@ -3,6 +3,7 @@
 #endif
 #include "top/Tui.h"
 #include "top/Graph.h"
+#include "top/Layout.h"
 #include "top/ProcessTable.h"
 #include "top/SampleRound.h"
 #include <clocale>
@@ -248,6 +249,7 @@ static std::vector<HelpLine> helpLines(int page, int width) {
         entry("Left / Right", "Scroll a long process command horizontally.");
         entry("+ / =, -", "Increase / decrease the post-collection wait by 0.1s (0.2-60s), in the list or details. Session only.");
         entry("Space", "Freeze / resume displayed data. Background sampling continues; resume jumps to the latest snapshot.");
+        entry("c", "Toggle Auto / Compact devices. Auto keeps at least 5 process rows; small windows may show a two-line history summary. Session only.");
         section("PROCESS SELECTION");
         entry("Click process", "Select and follow a process across refreshes and sorting.");
         entry("Click outside rows", "Clear selection, except when clicking a sort header.");
@@ -360,53 +362,70 @@ static void tableRule(int y, const std::vector<int>& columns, bool top = false, 
 }
 static void draw(const Snapshot& s, const History& history, int& deviceOffset, int& processOffset, bool deviceFocus, int pan, double secondsPerColumn, bool stale,
                  const ProcessSort& sort, ProcessHeader& processHeader, ProcessRows& processRows, const ProcessSelection& selection,
-                 const std::string& query) {
+                 const std::string& query, const MainLayout& layout, bool forceCompact) {
     erase();
     const int left = 1, right = COLS - 2;
-    if (COLS < 90 || LINES < 24) {
+    if (!layout.valid) {
         text(3, left, "Terminal too small: need 90 columns x 24 rows. Resize or press q.");
         return;
     }
 
-    // Two lines per device, including on the side-by-side 120-column layout.
+    const bool compact = layout.compact;
     const bool shortDeviceLabel = COLS < 100;
-    const std::vector<int> columns{left, 21, 46, shortDeviceLabel ? 65 : 75, right};
+    const std::vector<int> columns = compact ? std::vector<int>{left, 21, 51, 61, 73, right}
+        : std::vector<int>{left, 21, 46, shortDeviceLabel ? 65 : 75, right};
     auto cell = [&](int y, size_t col, const std::string& value, int color = 0, int offset = 0) {
         const int width = columns[col + 1] - columns[col] - 3 - offset;
         if (width > 0) text(y, columns[col] + 2 + offset, value, color, width);
     };
     tableRule(1, {left, right}, true);
     double age = std::chrono::duration<double>(Clock::now() - s.sampled).count();
-    text(2, left + 2, "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "    Driver: " + s.driver + "    CANN: " + s.cann
-        + "    collect " + number(s.collectionSeconds, 2, "s")
-        + (stale ? "  STALE " + number(age, 0, "s") : ""), stale ? 3 : 0, right - left - 3);
+    const int visible = layout.visibleDevices;
+    deviceOffset = std::clamp(deviceOffset, 0, std::max(0, static_cast<int>(s.devices.size()) - visible));
+    const std::string mode = forceCompact ? "Compact" : compact ? "Auto/Compact" : "Auto/Detailed";
+    const auto range = s.devices.empty() ? "0/0" : std::to_string(deviceOffset + 1) + "-"
+        + std::to_string(deviceOffset + visible) + "/" + std::to_string(s.devices.size());
+    text(2, left + 2, "ascend-monitor-tui " ASCEND_MONITOR_TUI_VERSION "  " + mode + " [c]  NPUs " + range
+        + (stale ? "  STALE " + number(age, 0, "s") : "")
+        + "  Driver: " + s.driver + "    CANN: " + s.cann
+        + "    collect " + number(s.collectionSeconds, 2, "s"), stale ? 3 : 0, right - left - 3);
     vertical(2, left, 1); vertical(2, right, 1);
     tableRule(3, columns);
     for (size_t i = 1; i + 1 < columns.size(); ++i) mvaddch(3, columns[i], lineGlyph(ACS_TTEE));
     cell(4, 0, std::string(deviceFocus ? "> " : "") + "NPU  Name");
-    const bool compact = LINES < 28;
-    if (!compact) cell(5, 0, "Temp      Power");
-    cell(4, 1, "Bus-Id / Memory type");
-    if (!compact) cell(5, 1, "Memory used / total");
-    cell(4, 2, shortDeviceLabel ? "Card/Chip Share" : "Card / Chip / Share");
-    if (!compact) cell(5, 2, "Core / Logic ID");
-    cell(4, 3, "Memory / AI Core");
+    if (compact) {
+        cell(4, 1, "Memory used / total");
+        cell(4, 2, "CORE");
+        cell(4, 3, "Temp");
+        cell(4, 4, "Power");
+    } else {
+        cell(5, 0, "Temp      Power");
+        cell(4, 1, "Bus-Id / Memory type");
+        cell(5, 1, "Memory used / total");
+        cell(4, 2, shortDeviceLabel ? "Card/Chip Share" : "Card / Chip / Share");
+        cell(5, 2, "Core / Logic ID");
+        cell(4, 3, "Memory / AI Core");
+    }
     for (int x : columns) vertical(4, x, compact ? 1 : 2);
     tableRule(compact ? 5 : 6, columns);
 
-    int plotHeight = LINES >= 45 ? 3 : 1;
-    int historyHeight = 5 + 2 * plotHeight;
-    // Fixed rows outside the devices/history panels: 13 compact, 15 regular.
-    // Reserve one more row so the bordered process table has data space.
-    const int reserved = compact ? 14 : 16;
-    int visible = std::max(1, std::min(static_cast<int>(s.devices.size()), (LINES - reserved - historyHeight) / 3));
-    deviceOffset = std::clamp(deviceOffset, 0, std::max(0, static_cast<int>(s.devices.size()) - visible));
-    int y = compact ? 6 : 7;
+    const int plotHeight = layout.plotHeight, historyHeight = layout.historyHeight;
+    int y = layout.deviceTop;
     auto linked = selection.identity() ? processDevices(s, *selection.identity()) : std::set<std::pair<int, int>>{};
     for (int i = deviceOffset; i < std::min(deviceOffset + visible, static_cast<int>(s.devices.size())); ++i) {
         const auto& d = s.devices[i];
         mutedDevice = !linked.empty() && !linked.count({d.card, d.chip});
         cell(y, 0, fit(deviceId(d.physical), 5) + d.name);
+        if (compact) {
+            cell(y, 1, bytes(d.memory.used) + " / " + bytes(d.memory.total), severity(d.memory.percent()));
+            cell(y, 2, number(d.core, 0, "%"), severity(d.core));
+            cell(y, 3, number(d.temperature, 0, "C"));
+            cell(y, 4, number(d.power, 1, "W"));
+            for (int x : columns) vertical(y, x, 1);
+            mutedDevice = false;
+            ++y;
+            continue;
+        }
         cell(y + 1, 0, fit(number(d.temperature, 0, "C"), 10) + number(d.power, 1, "W"));
         cell(y, 1, d.pci + " " + d.memory.kind);
         cell(y + 1, 1, bytes(d.memory.used) + " / " + bytes(d.memory.total), severity(d.memory.percent()));
@@ -427,47 +446,68 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     }
     if (s.devices.empty()) {
         text(y, left + 2, "No NPU devices available", 2);
-        vertical(y, left, 2); vertical(y, right, 2);
-        tableRule(y + 2, {left, right}); y += 3;
+        vertical(y, left, compact ? 1 : 2); vertical(y, right, compact ? 1 : 2);
+        if (!compact) tableRule(y + 2, {left, right});
+        y += compact ? 1 : 3;
     }
 
-    const int split = std::min(65, COLS - 38);
+    const int split = compact ? (COLS < 100 ? 51 : 61) : std::min(65, COLS - 38);
     const int hostX = left + 2, hostWidth = split - hostX - 1;
     const int npuX = split + 2, npuWidth = right - npuX - 1;
     const std::vector<int> panels{left, split, right};
     // Terminate the device columns and start the history panel divider.
+    if (compact) ++y;
     tableRule(y - 1, columns, false, true);
     mvaddch(y - 1, left, lineGlyph(ACS_LTEE)); mvaddch(y - 1, right, lineGlyph(ACS_RTEE));
-    mvaddch(y - 1, split, lineGlyph(split == columns[3] ? ACS_PLUS : ACS_TTEE));
+    mvaddch(y - 1, split, lineGlyph(std::find(columns.begin(), columns.end(), split) != columns.end() ? ACS_PLUS : ACS_TTEE));
+    y = layout.historyTop;
     auto a = aggregate(s);
-    const auto graphTime = s.sampled;
-    const int dotsPerCell = asciiGraphics ? 1 : 2;
-    const int upper = plotHeight + 2;
-    const int lowerY = y + upper + 1;
-    const int bottom = y + historyHeight - 1;
-    chart(y, hostX, hostWidth, upper, history, &HistoryPoint::cpu, secondsPerColumn, 4, graphTime);
-    chart(y, npuX, npuWidth, upper, history, &HistoryPoint::npuMemory, secondsPerColumn, 2, graphTime);
-    ticks(y + upper, hostX, hostWidth, dotsPerCell * secondsPerColumn);
-    ticks(y + upper, npuX, npuWidth, dotsPerCell * secondsPerColumn);
-    chart(lowerY, hostX, hostWidth, upper - 1, history, &HistoryPoint::memory, secondsPerColumn, 5, graphTime, true);
-    chart(bottom, hostX, hostWidth, 1, history, &HistoryPoint::swap, secondsPerColumn, 6, graphTime);
-    chart(lowerY, npuX, npuWidth, upper, history, &HistoryPoint::npuCore, secondsPerColumn, 1, graphTime, true);
-    text(y, hostX, "Load: " + number(s.host.load1, 2) + " " + number(s.host.load5, 2) + " " + number(s.host.load15, 2), 0, hostWidth);
-    text(y + 1, hostX, "CPU: " + number(s.host.cpu, 1, "%"), 0, hostWidth);
-    text(y, npuX, "NPU MEM: " + number(a.memory, 1, "%") + " (" + std::to_string(a.memoryCount) + "/" + std::to_string(a.total) + ")", 0, npuWidth);
-    text(bottom - 1, hostX, "MEM: " + bytes(s.host.memory.used) + " (" + number(s.host.memory.percent(), 1, "%") + ") ", 0, hostWidth);
-    text(bottom, hostX, "SWP: " + bytes(s.host.swap.used) + " (" + number(s.host.swap.percent(), 1, "%") + ") ", 0, hostWidth);
-    text(bottom, npuX, "NPU CORE: " + number(a.core, 1, "%") + " (" + std::to_string(a.coreCount) + "/" + std::to_string(a.total) + ") ", 0, npuWidth);
+    const auto npuMemory = "NPU MEM: " + number(a.memory, 1, "%") + " (" + std::to_string(a.memoryCount) + "/" + std::to_string(a.total) + ")";
+    const auto npuCore = "NPU CORE: " + number(a.core, 1, "%") + " (" + std::to_string(a.coreCount) + "/" + std::to_string(a.total) + ")";
+    if (layout.historySummary) {
+        text(y, hostX, "CPU: " + number(s.host.cpu, 1, "%") + "  Load: " + number(s.host.load1, 2), 0, hostWidth);
+        text(y + 1, hostX, "MEM: " + bytes(s.host.memory.used) + " (" + number(s.host.memory.percent(), 1, "%")
+            + ") SWP: " + number(s.host.swap.percent(), 1, "%"), 0, hostWidth);
+        text(y, npuX, npuMemory, 0, npuWidth);
+        text(y + 1, npuX, npuCore, 0, npuWidth);
+    } else {
+        const auto graphTime = s.sampled;
+        const int dotsPerCell = asciiGraphics ? 1 : 2;
+        const int upper = plotHeight + 2;
+        const int lowerY = y + upper + 1;
+        const int bottom = y + historyHeight - 1;
+        chart(y, hostX, hostWidth, upper, history, &HistoryPoint::cpu, secondsPerColumn, 4, graphTime);
+        chart(y, npuX, npuWidth, upper, history, &HistoryPoint::npuMemory, secondsPerColumn, 2, graphTime);
+        ticks(y + upper, hostX, hostWidth, dotsPerCell * secondsPerColumn);
+        ticks(y + upper, npuX, npuWidth, dotsPerCell * secondsPerColumn);
+        chart(lowerY, hostX, hostWidth, upper - 1, history, &HistoryPoint::memory, secondsPerColumn, 5, graphTime, true);
+        chart(bottom, hostX, hostWidth, 1, history, &HistoryPoint::swap, secondsPerColumn, 6, graphTime);
+        chart(lowerY, npuX, npuWidth, upper, history, &HistoryPoint::npuCore, secondsPerColumn, 1, graphTime, true);
+        text(y, hostX, "Load: " + number(s.host.load1, 2) + " " + number(s.host.load5, 2) + " " + number(s.host.load15, 2), 0, hostWidth);
+        text(y + 1, hostX, "CPU: " + number(s.host.cpu, 1, "%"), 0, hostWidth);
+        text(y, npuX, npuMemory, 0, npuWidth);
+        text(bottom - 1, hostX, "MEM: " + bytes(s.host.memory.used) + " (" + number(s.host.memory.percent(), 1, "%") + ") ", 0, hostWidth);
+        text(bottom, hostX, "SWP: " + bytes(s.host.swap.used) + " (" + number(s.host.swap.percent(), 1, "%") + ") ", 0, hostWidth);
+        text(bottom, npuX, npuCore + " ", 0, npuWidth);
+    }
     for (int x : panels) vertical(y, x, historyHeight);
-    mvaddch(y + 2 + plotHeight, left, lineGlyph(ACS_LTEE));
-    mvaddch(y + 2 + plotHeight, split, lineGlyph(ACS_PLUS));
-    mvaddch(y + 2 + plotHeight, right, lineGlyph(ACS_RTEE));
+    if (!layout.historySummary) {
+        mvaddch(y + 2 + plotHeight, left, lineGlyph(ACS_LTEE));
+        mvaddch(y + 2 + plotHeight, split, lineGlyph(ACS_PLUS));
+        mvaddch(y + 2 + plotHeight, right, lineGlyph(ACS_RTEE));
+    }
     y += historyHeight;
-    tableRule(y++, panels, false, true);
-    if (!compact) text(y++, left, s.host.root ? "! CAUTION: SUPERUSER LOGGED IN" : "", 2);
+    if (!compact) {
+        tableRule(y++, panels, false, true);
+        text(y++, left, s.host.root ? "! CAUTION: SUPERUSER LOGGED IN" : "", 2);
+    }
 
-    const int processTop = y;
-    tableRule(y++, {left, right}, true);
+    const int processTop = layout.processTop;
+    y = processTop;
+    if (compact) {
+        tableRule(y++, panels, false, true);
+        mvaddch(processTop, left, lineGlyph(ACS_LTEE)); mvaddch(processTop, right, lineGlyph(ACS_RTEE));
+    } else tableRule(y++, {left, right}, true);
     text(y, left + 2, std::string(!deviceFocus ? "> " : "") + "Processes:" + (compact && s.host.root ? " [root]" : "")
         + "  [s: sort / f: find]");
     auto identity = s.host.user + "@" + s.host.hostname;
@@ -490,7 +530,8 @@ static void draw(const Snapshot& s, const History& history, int& deviceOffset, i
     }
     ++y;
     tableRule(y++, {left, right});
-    int rows = std::max(0, LINES - y - 2);
+    y = layout.processDataTop;
+    const int rows = layout.processRows;
     auto processes = sortedProcesses(s, sort);
     auto selected = selection.index(processes);
     if (selected && rows > 0) {
@@ -592,7 +633,7 @@ int runTui(double interval, bool ascii) {
     {
         Sampler sampler(interval); int deviceOffset = 0, processOffset = 0, pan = 0;
         const double secondsPerColumn = interval;
-        bool paused = false;
+        bool paused = false, forceCompact = false;
         SamplerFrame frame;
         bool deviceFocus = false, showHelp = false, showDetails = false;
         ProcessSort sort; ProcessHeader processHeader; ProcessRows processRows; ProcessSelection selection; HelpState helpState;
@@ -602,6 +643,7 @@ int runTui(double interval, bool ascii) {
             processHeader = {}; processRows = {};
             if (!paused) frame = sampler.frame();
             auto s = frame.snapshot;
+            const auto layout = mainLayout(LINES, COLS, s ? s->devices.size() : 0, forceCompact);
             auto rows = s ? sortedProcesses(*s, sort) : std::vector<const Process*>{};
             if (!showDetails && s && s->error.empty() && std::all_of(s->devices.begin(), s->devices.end(),
                 [](const Device& d) { return d.processesAvailable; })) selection.reconcile(rows);
@@ -616,7 +658,7 @@ int runTui(double interval, bool ascii) {
             else if (s && showDetails) drawProcessDetails(frame.inspection, *s, secondsPerColumn, paused, !paused && frame.stale);
             else if (s) {
                 draw(*s, frame.history, deviceOffset, processOffset, deviceFocus, pan, secondsPerColumn, !paused && frame.stale,
-                    sort, processHeader, processRows, selection, query);
+                    sort, processHeader, processRows, selection, query, layout, forceCompact);
                 if (!notice.empty()) text(LINES - 1, 1, notice, 2);
             } else { erase(); text(1, 1, "ascend-monitor-tui: collecting local NPU data... (q to quit)"); }
             if (!showHelp) toolbar(interval, paused, s.get(), showDetails);
@@ -690,6 +732,7 @@ int runTui(double interval, bool ascii) {
                 continue;
             }
             if (key == 'f') { searching = true; deviceFocus = false; notice.clear(); continue; }
+            if (key == 'c') { forceCompact = !forceCompact; continue; }
             if (key == 'q') break;
             if (key == 27) {
                 if (!query.empty()) { query.clear(); notice.clear(); continue; }
@@ -721,8 +764,9 @@ int runTui(double interval, bool ascii) {
                 if (!selection.identity()) processOffset = 0;
             }
             if (key == '\t') deviceFocus = !deviceFocus;
+            const int pageRows = std::max(1, deviceFocus ? layout.visibleDevices : processRows.count);
             int delta = key == KEY_DOWN || key == 'j' ? 1 : key == KEY_UP || key == 'k' ? -1
-                : key == KEY_NPAGE ? std::max(1, processRows.count) : key == KEY_PPAGE ? -std::max(1, processRows.count) : 0;
+                : key == KEY_NPAGE ? pageRows : key == KEY_PPAGE ? -pageRows : 0;
             if (deviceFocus) {
                 if (delta) deviceOffset = std::max(0, deviceOffset + delta);
                 if (key == KEY_HOME) deviceOffset = 0;
