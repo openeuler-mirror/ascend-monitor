@@ -20,6 +20,11 @@
 	- 未选中时展示所有设备进程
 	- 进程数据解析自 `npu-smi info`
 	- 默认每秒自动刷新，刷新间隔可通过“设置”菜单配置
+- 设备参数配置页（“参数配置”标签）：
+	- 查询并展示每芯片可配置参数的当前值：功耗上限（`npu-smi info -t power-limit`）、AICore 频率（`npu-smi info -t aicore-freq`）、AI CPU 频率（`npu-smi info -t aicpu-freq`）
+	- 支持通过 `npu-smi set -t <type> -i <Card ID> -c <Chip ID> -d <value>` 修改参数，执行前需二次确认
+	- 支持按芯片过滤、一键刷新；产品不支持的参数会显示“不支持”
+	- 参数修改为高危操作，需具备 root 权限；远程模式下经由 SSH 在远端执行
 - 远程采集支持（SSH）：可连接仅在远端可用 `npu-smi` 的主机
 - 版本显示：左上角显示 Logo，右上角显示 `npu-smi -v` 解析到的版本号（获取失败时不显示）
 - 启动单实例限制：防止重复启动程序

@@ -5,6 +5,7 @@
 #include <QChart>
 #include <QChartView>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QDateTimeAxis>
 #include <QHash>
 #include <QLabel>
@@ -49,6 +50,7 @@ private slots:
     void updateProcessPanel();
     void showChartsPage();
     void showProcessPage();
+    void showParamPage();
     void updateConnectionModeUi();
 
 private:
@@ -57,6 +59,10 @@ private:
     void setupSettingsMenu();
     void setupMonitorPanel();
     void setupProcessPanel();
+    void setupParamPanel();
+    void updateParamPanel();
+    void applySelectedParam();
+    QString selectedParamChipId() const;
     void showConfigurationDialog();
     void setChartRefreshInterval(int intervalSeconds);
     void setDeviceInfoRefreshInterval(int intervalSeconds);
@@ -100,6 +106,15 @@ private:
     QButtonGroup *m_viewButtonGroup = nullptr;
     QTableWidget *m_processTable = nullptr;
     QLabel *m_processSummaryLabel = nullptr;
+
+    QPushButton *m_paramViewButton = nullptr;
+    QWidget *m_paramPage = nullptr;
+    QLabel *m_paramCardLabel = nullptr;
+    QComboBox *m_paramChipCombo = nullptr;
+    QPushButton *m_paramRefreshButton = nullptr;
+    QPushButton *m_paramEditButton = nullptr;
+    QTableWidget *m_paramTable = nullptr;
+    bool m_paramInProgress = false;
 
     QLabel *m_statusLabel = nullptr;
     QLabel *m_updatedLabel = nullptr;
