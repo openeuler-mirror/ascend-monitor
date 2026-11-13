@@ -76,6 +76,26 @@ struct NpuMonitorSnapshot {
     QStringList errors;
 };
 
+struct NpuDeviceParam {
+    QString key;            // npu-smi set 参数类型，例如 "power-limit"
+    QString name;           // 展示名称，例如 "功耗上限"
+    QString cardId;
+    QString chipId;
+    QString value;          // 当前值（原始文本，查询失败时为空）
+    QString unit;           // 单位，例如 "W" / "MHz"
+    double minValue = 0.0;
+    double maxValue = 0.0;
+    bool editable = false;  // 是否可通过 npu-smi set 修改
+    bool supported = false; // 查询是否成功（不支持的芯片/产品为 false）
+    QString description;    // 说明信息
+};
+
+struct NpuParamSetResult {
+    bool success = false;
+    QString command;        // 实际执行的 npu-smi 命令
+    QString message;        // 结果说明或错误信息
+};
+
 struct NpuProcessInfo {
     QString cardId;
     QString chipId;

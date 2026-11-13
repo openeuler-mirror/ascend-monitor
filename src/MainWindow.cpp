@@ -14,8 +14,10 @@
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QFont>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QMenu>
+#include <QDoubleSpinBox>
 #include <QPen>
 #include <QPixmap>
 #include <QRadioButton>
@@ -503,8 +505,10 @@ void MainWindow::setupMonitorPanel()
 
     m_chartViewButton = new QPushButton(QStringLiteral("监控图表"), m_monitorPanel);
     m_processViewButton = new QPushButton(QStringLiteral("进程监控"), m_monitorPanel);
+    m_paramViewButton = new QPushButton(QStringLiteral("参数配置"), m_monitorPanel);
     m_chartViewButton->setCheckable(true);
     m_processViewButton->setCheckable(true);
+    m_paramViewButton->setCheckable(true);
     m_chartViewButton->setChecked(true);
 
     const QString switchButtonStyle = QStringLiteral(
@@ -531,17 +535,21 @@ void MainWindow::setupMonitorPanel()
         "}");
     m_chartViewButton->setStyleSheet(switchButtonStyle);
     m_processViewButton->setStyleSheet(switchButtonStyle);
+    m_paramViewButton->setStyleSheet(switchButtonStyle);
 
     m_viewButtonGroup = new QButtonGroup(this);
     m_viewButtonGroup->setExclusive(true);
     m_viewButtonGroup->addButton(m_chartViewButton);
     m_viewButtonGroup->addButton(m_processViewButton);
+    m_viewButtonGroup->addButton(m_paramViewButton);
 
     connect(m_chartViewButton, &QPushButton::clicked, this, &MainWindow::showChartsPage);
     connect(m_processViewButton, &QPushButton::clicked, this, &MainWindow::showProcessPage);
+    connect(m_paramViewButton, &QPushButton::clicked, this, &MainWindow::showParamPage);
 
     switchLayout->addWidget(m_chartViewButton);
     switchLayout->addWidget(m_processViewButton);
+    switchLayout->addWidget(m_paramViewButton);
     switchLayout->addStretch(1);
 
     m_monitorStack = new QStackedWidget(m_monitorPanel);
@@ -577,9 +585,11 @@ void MainWindow::setupMonitorPanel()
     grid->setRowStretch(1, 1);
 
     setupProcessPanel();
+    setupParamPanel();
 
     m_monitorStack->addWidget(m_chartPage);
     m_monitorStack->addWidget(m_processPage);
+    m_monitorStack->addWidget(m_paramPage);
     m_monitorStack->setCurrentWidget(m_chartPage);
 
     panelLayout->addLayout(switchLayout);
@@ -771,6 +781,10 @@ void MainWindow::updateSelectedCardMappings()
         populateMappings(m_lastResult.mappings);
         updateProcessPanel();
         return;
+    }
+
+    if (m_monitorStack != nullptr && m_monitorStack->currentWidget() == m_paramPage) {
+        updateParamPanel();
     }
 
     QVector<NpuMappingEntry> filteredMappings;
@@ -989,6 +1003,330 @@ void MainWindow::showProcessPage()
     }
 
     updateProcessPanel();
+}
+
+void MainWindow::showParamPage()
+{
+    if (m_monitorStack == nullptr || m_paramPage == nullptr) {
+        return;
+    }
+
+    m_monitorStack->setCurrentWidget(m_paramPage);
+    if (m_paramViewButton != nullptr) {
+        m_paramViewButton->setChecked(true);
+    }
+
+    updateParamPanel();
+}
+
+void MainWindow::setupParamPanel()
+{
+    m_paramPage = new QWidget(this);
+    auto *paramLayout = new QVBoxLayout(m_paramPage);
+    paramLayout->setContentsMargins(0, 0, 0, 0);
+    paramLayout->setSpacing(6);
+
+    auto *paramToolbar = new QHBoxLayout();
+    paramToolbar->setSpacing(8);
+
+    m_paramCardLabel = new QLabel(QStringLiteral("Card: -"), m_paramPage);
+    m_paramChipCombo = new QComboBox(m_paramPage);
+    m_paramChipCombo->setMinimumWidth(160);
+    m_paramRefreshButton = new QPushButton(QStringLiteral("刷新"), m_paramPage);
+    m_paramEditButton = new QPushButton(QStringLiteral("修改参数"), m_paramPage);
+
+    paramToolbar->addWidget(m_paramCardLabel);
+    paramToolbar->addWidget(new QLabel(QStringLiteral("Chip:"), m_paramPage));
+    paramToolbar->addWidget(m_paramChipCombo);
+    paramToolbar->addStretch(1);
+    paramToolbar->addWidget(m_paramRefreshButton);
+    paramToolbar->addWidget(m_paramEditButton);
+
+    m_paramTable = new QTableWidget(m_paramPage);
+    m_paramTable->setColumnCount(7);
+    m_paramTable->setHorizontalHeaderLabels({
+        QStringLiteral("Chip ID"),
+        QStringLiteral("参数"),
+        QStringLiteral("当前值"),
+        QStringLiteral("单位"),
+        QStringLiteral("可调范围"),
+        QStringLiteral("状态"),
+        QStringLiteral("说明")
+    });
+    m_paramTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_paramTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    m_paramTable->verticalHeader()->setVisible(false);
+    m_paramTable->setAlternatingRowColors(true);
+    m_paramTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_paramTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_paramTable->setSelectionMode(QAbstractItemView::SingleSelection);
+
+    paramLayout->addLayout(paramToolbar);
+    paramLayout->addWidget(m_paramTable);
+
+    connect(m_paramRefreshButton, &QPushButton::clicked, this, &MainWindow::updateParamPanel);
+    connect(m_paramEditButton, &QPushButton::clicked, this, &MainWindow::applySelectedParam);
+    connect(m_paramChipCombo, &QComboBox::currentIndexChanged, this, &MainWindow::updateParamPanel);
+    connect(m_paramTable, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
+        applySelectedParam();
+    });
+}
+
+QString MainWindow::selectedParamChipId() const
+{
+    if (m_paramChipCombo == nullptr) {
+        return QString();
+    }
+
+    const QString text = m_paramChipCombo->currentData().toString().trimmed();
+    if (text.isEmpty() || text == QStringLiteral("all")) {
+        return QString();
+    }
+    return text;
+}
+
+void MainWindow::updateParamPanel()
+{
+    if (m_paramTable == nullptr || m_paramCardLabel == nullptr || m_paramChipCombo == nullptr) {
+        return;
+    }
+
+    if (m_paramInProgress || m_scanInProgress) {
+        return;
+    }
+
+    // 选中的卡片，未选中时取第一张卡
+    QString cardId = selectedCardId();
+    if (cardId.isEmpty() && !m_lastResult.cards.isEmpty()) {
+        cardId = m_lastResult.cards.first().cardId.trimmed();
+    }
+    if (cardId.isEmpty()) {
+        m_paramCardLabel->setText(QStringLiteral("Card: -"));
+        m_paramTable->setRowCount(0);
+        m_paramChipCombo->clear();
+        return;
+    }
+
+    // 芯片列表来自映射表（排除 Mcu）
+    QStringList chipIds;
+    for (const NpuMappingEntry &mapping : m_lastResult.mappings) {
+        if (mapping.cardId.trimmed() != cardId) {
+            continue;
+        }
+        if (mapping.chipName.trimmed().compare(QStringLiteral("Mcu"), Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+        if (!mapping.chipId.trimmed().isEmpty() && !chipIds.contains(mapping.chipId.trimmed())) {
+            chipIds.append(mapping.chipId.trimmed());
+        }
+    }
+    if (chipIds.isEmpty()) {
+        chipIds.append(QStringLiteral("0"));
+    }
+
+    const int previousBlock = m_paramChipCombo->blockSignals(true);
+    m_paramChipCombo->clear();
+    m_paramChipCombo->addItem(QStringLiteral("全部芯片"), QStringLiteral("all"));
+    for (const QString &chipId : chipIds) {
+        m_paramChipCombo->addItem(QStringLiteral("Chip %1").arg(chipId), chipId);
+    }
+    m_paramChipCombo->blockSignals(previousBlock);
+
+    m_paramCardLabel->setText(QStringLiteral("Card: %1").arg(cardId));
+
+    const QString selectedChip = selectedParamChipId();
+    QStringList targetChips = chipIds;
+    if (!selectedChip.isEmpty()) {
+        targetChips = QStringList{selectedChip};
+    }
+
+    m_paramInProgress = true;
+    const NpuConnectionOptions options = m_activeConnectionOptions;
+
+    auto *watcher = new QFutureWatcher<QVector<NpuDeviceParam>>(this);
+    connect(watcher, &QFutureWatcher<QVector<NpuDeviceParam>>::finished, this, [this, watcher]() {
+        const QVector<NpuDeviceParam> params = watcher->result();
+        watcher->deleteLater();
+        m_paramInProgress = false;
+
+        if (m_paramTable == nullptr) {
+            return;
+        }
+
+        m_paramTable->clearSpans();
+        m_paramTable->setRowCount(params.size());
+
+        for (int row = 0; row < params.size(); ++row) {
+            const NpuDeviceParam &param = params.at(row);
+
+            auto *chipItem = new QTableWidgetItem(param.chipId);
+            auto *nameItem = new QTableWidgetItem(param.name);
+            auto *valueItem = new QTableWidgetItem(
+                param.supported ? param.value : QStringLiteral("-"));
+            auto *unitItem = new QTableWidgetItem(param.unit);
+            auto *rangeItem = new QTableWidgetItem(
+                param.editable
+                    ? QStringLiteral("%1 - %2").arg(param.minValue).arg(param.maxValue)
+                    : QStringLiteral("-"));
+            auto *statusItem = new QTableWidgetItem(
+                param.supported
+                    ? (param.editable ? QStringLiteral("可配置") : QStringLiteral("只读"))
+                    : QStringLiteral("不支持"));
+            auto *descriptionItem = new QTableWidgetItem(param.description);
+
+            chipItem->setToolTip(param.chipId);
+            valueItem->setToolTip(param.value);
+            descriptionItem->setToolTip(param.description);
+
+            // 通过用户角色保存参数上下文，供修改参数时使用
+            chipItem->setData(Qt::UserRole, param.cardId);
+            chipItem->setData(Qt::UserRole + 1, param.chipId);
+            chipItem->setData(Qt::UserRole + 2, param.key);
+            chipItem->setData(Qt::UserRole + 3, param.minValue);
+            chipItem->setData(Qt::UserRole + 4, param.maxValue);
+            chipItem->setData(Qt::UserRole + 5, param.supported && param.editable);
+            chipItem->setData(Qt::UserRole + 6, param.name);
+            chipItem->setData(Qt::UserRole + 7, param.value);
+
+            if (!param.supported) {
+                const QBrush mutedBrush(QColor(107, 114, 128));
+                valueItem->setForeground(mutedBrush);
+                statusItem->setForeground(mutedBrush);
+            }
+
+            m_paramTable->setItem(row, 0, chipItem);
+            m_paramTable->setItem(row, 1, nameItem);
+            m_paramTable->setItem(row, 2, valueItem);
+            m_paramTable->setItem(row, 3, unitItem);
+            m_paramTable->setItem(row, 4, rangeItem);
+            m_paramTable->setItem(row, 5, statusItem);
+            m_paramTable->setItem(row, 6, descriptionItem);
+        }
+    });
+
+    watcher->setFuture(QtConcurrent::run([options, cardId, targetChips]() {
+        NpuInfoProvider provider;
+        provider.setConnectionOptions(options);
+        return provider.collectDeviceParams(cardId, targetChips);
+    }));
+}
+
+void MainWindow::applySelectedParam()
+{
+    if (m_paramTable == nullptr || m_paramInProgress) {
+        return;
+    }
+
+    const int row = m_paramTable->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, QStringLiteral("修改参数"), QStringLiteral("请先在参数列表中选择一个参数。"));
+        return;
+    }
+
+    const QTableWidgetItem *chipItem = m_paramTable->item(row, 0);
+    if (chipItem == nullptr) {
+        return;
+    }
+
+    const QString cardId = chipItem->data(Qt::UserRole).toString();
+    const QString chipId = chipItem->data(Qt::UserRole + 1).toString();
+    const QString paramKey = chipItem->data(Qt::UserRole + 2).toString();
+    const double minValue = chipItem->data(Qt::UserRole + 3).toDouble();
+    const double maxValue = chipItem->data(Qt::UserRole + 4).toDouble();
+    const bool canEdit = chipItem->data(Qt::UserRole + 5).toBool();
+    const QString paramName = chipItem->data(Qt::UserRole + 6).toString();
+    const QString currentValue = chipItem->data(Qt::UserRole + 7).toString();
+
+    if (!canEdit) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("修改参数"),
+            QStringLiteral("当前参数不支持修改（该芯片不提供此参数或不可配置）。"));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("修改参数"));
+    dialog.setMinimumWidth(380);
+
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    auto *infoLabel = new QLabel(
+        QStringLiteral("Card %1 / Chip %2：%3\n当前值：%4").arg(cardId, chipId, paramName, currentValue),
+        &dialog);
+    dialogLayout->addWidget(infoLabel);
+
+    auto *valueLayout = new QHBoxLayout();
+    valueLayout->addWidget(new QLabel(QStringLiteral("新值："), &dialog));
+    auto *valueSpinBox = new QDoubleSpinBox(&dialog);
+    valueSpinBox->setDecimals(0);
+    valueSpinBox->setRange(minValue, maxValue);
+    valueSpinBox->setValue(currentValue.toDouble());
+    valueSpinBox->setSuffix(QStringLiteral(" "));
+    valueLayout->addWidget(valueSpinBox);
+    dialogLayout->addLayout(valueLayout);
+
+    auto *hintLabel = new QLabel(
+        QStringLiteral("注意：参数修改将直接影响设备运行状态，请确认后再执行。"),
+        &dialog);
+    hintLabel->setStyleSheet(QStringLiteral("color: #b45309;"));
+    dialogLayout->addWidget(hintLabel);
+
+    auto *buttonLayout = new QHBoxLayout();
+    buttonLayout->addStretch(1);
+    auto *applyButton = new QPushButton(QStringLiteral("应用"), &dialog);
+    auto *cancelButton = new QPushButton(QStringLiteral("取消"), &dialog);
+    buttonLayout->addWidget(applyButton);
+    buttonLayout->addWidget(cancelButton);
+    dialogLayout->addLayout(buttonLayout);
+    connect(applyButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const QString newValue = QString::number(valueSpinBox->value(), 'f', 0);
+    const QString commandPreview = QStringLiteral("npu-smi set -t %1 -i %2 -c %3 -d %4")
+                                       .arg(paramKey, cardId, chipId, newValue);
+
+    const QMessageBox::StandardButton confirm = QMessageBox::warning(
+        this,
+        QStringLiteral("确认修改"),
+        QStringLiteral("即将执行：\n%1\n\n是否继续？").arg(commandPreview),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirm != QMessageBox::Yes) {
+        return;
+    }
+
+    m_paramInProgress = true;
+    m_statusLabel->setText(QStringLiteral("正在应用参数修改..."));
+    const NpuConnectionOptions options = m_activeConnectionOptions;
+
+    auto *watcher = new QFutureWatcher<NpuParamSetResult>(this);
+    connect(watcher, &QFutureWatcher<NpuParamSetResult>::finished, this, [this, watcher]() {
+        const NpuParamSetResult result = watcher->result();
+        watcher->deleteLater();
+        m_paramInProgress = false;
+
+        if (result.success) {
+            m_statusLabel->setText(QStringLiteral("参数修改成功：%1").arg(result.command));
+        } else {
+            m_statusLabel->setText(QStringLiteral("参数修改失败：%1").arg(result.message));
+            QMessageBox::critical(
+                this,
+                QStringLiteral("修改参数"),
+                QStringLiteral("参数修改失败：\n%1").arg(result.message));
+        }
+
+        updateParamPanel();
+    });
+
+    watcher->setFuture(QtConcurrent::run([options, cardId, chipId, paramKey, newValue]() {
+        NpuInfoProvider provider;
+        provider.setConnectionOptions(options);
+        return provider.setDeviceParam(cardId, chipId, paramKey, newValue);
+    }));
 }
 
 void MainWindow::updateConnectionModeUi()

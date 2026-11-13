@@ -22,6 +22,12 @@ public:
     NpuScanResult scan() const;
     NpuMonitorSnapshot collectMonitor(const QStringList &cardIds) const;
     QVector<NpuProcessInfo> collectProcesses(const QString &cardId) const;
+    QVector<NpuDeviceParam> collectDeviceParams(const QString &cardId, const QStringList &chipIds) const;
+    NpuParamSetResult setDeviceParam(
+        const QString &cardId,
+        const QString &chipId,
+        const QString &paramKey,
+        const QString &value) const;
 
 private:
     struct UsageMetrics {
@@ -52,6 +58,11 @@ private:
     QMap<QString, CpuNumConfig> parseCpuNumCfgByChip(const QString &output) const;
     QVector<NpuProcessInfo> parseProcesses(const QString &output, const QString &cardId) const;
     double parsePower(const QString &output, bool *ok) const;
+    QString parseParamValue(const QString &output, const QStringList &fieldKeywords) const;
+    bool parseParamValueAsDouble(
+        const QString &output,
+        const QStringList &fieldKeywords,
+        double *value) const;
     double parseNumericValue(const QString &value, bool *ok) const;
     QStringList extractCardIds(const QVector<NpuCard> &cards, const QVector<NpuMappingEntry> &mappings) const;
     CommandAttempt runCommand(const QStringList &arguments) const;

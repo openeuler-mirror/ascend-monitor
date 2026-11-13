@@ -13,6 +13,58 @@ bool looksLikeSeparator(const QString &line)
     const QString simplified = line.trimmed();
     return simplified.startsWith('+') || simplified.startsWith("---") || simplified.startsWith("===");
 }
+
+struct DeviceParamDefinition {
+    QString key;             // npu-smi set 参数类型
+    QString name;            // 展示名称
+    QString unit;            // 单位
+    double minValue;
+    double maxValue;
+    QString infoType;        // 查询用的 npu-smi info -t 类型
+    QStringList valueFields; // 查询输出中代表当前值的字段关键词（大小写不敏感）
+    bool editable;
+    QString description;
+};
+
+const QVector<DeviceParamDefinition> &deviceParamDefinitions()
+{
+    static const QVector<DeviceParamDefinition> definitions = {
+        {
+            QStringLiteral("power-limit"),
+            QStringLiteral("功耗上限"),
+            QStringLiteral("W"),
+            100.0,
+            400.0,
+            QStringLiteral("power-limit"),
+            { QStringLiteral("Power Limit"), QStringLiteral("Aicore limit") },
+            true,
+            QStringLiteral("设置芯片功耗上限，实际可调范围以 npu-smi 校验为准"),
+        },
+        {
+            QStringLiteral("aicore-freq"),
+            QStringLiteral("AICore 频率"),
+            QStringLiteral("MHz"),
+            400.0,
+            2000.0,
+            QStringLiteral("aicore-freq"),
+            { QStringLiteral("Aicore frequency"), QStringLiteral("Aicore freq") },
+            true,
+            QStringLiteral("设置 AICore 工作频率，实际可调范围以 npu-smi 校验为准"),
+        },
+        {
+            QStringLiteral("aicpu-freq"),
+            QStringLiteral("AI CPU 频率"),
+            QStringLiteral("MHz"),
+            400.0,
+            2000.0,
+            QStringLiteral("aicpu-freq"),
+            { QStringLiteral("Aicpu frequency"), QStringLiteral("Aicpu freq") },
+            true,
+            QStringLiteral("设置 AI CPU 工作频率，实际可调范围以 npu-smi 校验为准"),
+        },
+    };
+    return definitions;
+}
 }
 
 NpuInfoProvider::NpuInfoProvider(QObject *parent)
@@ -273,6 +325,108 @@ QVector<NpuProcessInfo> NpuInfoProvider::collectProcesses(const QString &cardId)
     }
 
     return parseProcesses(infoAttempt.stdOut, cardId);
+}
+
+QVector<NpuDeviceParam> NpuInfoProvider::collectDeviceParams(const QString &cardId, const QStringList &chipIds) const
+{
+    QVector<NpuDeviceParam> params;
+
+    for (const QString &chipId : chipIds) {
+        const QString trimmedChipId = chipId.trimmed();
+        if (trimmedChipId.isEmpty()) {
+            continue;
+        }
+
+        for (const DeviceParamDefinition &definition : deviceParamDefinitions()) {
+            NpuDeviceParam param;
+            param.key = definition.key;
+            param.name = definition.name;
+            param.unit = definition.unit;
+            param.minValue = definition.minValue;
+            param.maxValue = definition.maxValue;
+            param.editable = definition.editable;
+            param.description = definition.description;
+            param.cardId = cardId;
+            param.chipId = trimmedChipId;
+
+            const CommandAttempt attempt = runCommand({
+                QStringLiteral("info"),
+                QStringLiteral("-t"),
+                definition.infoType,
+                QStringLiteral("-i"),
+                cardId,
+                QStringLiteral("-c"),
+                trimmedChipId
+            });
+
+            const QString value = parseParamValue(attempt.stdOut, definition.valueFields);
+            if (attempt.exitCode == 0 && !value.isEmpty()) {
+                param.value = value;
+                param.supported = true;
+            } else {
+                param.value = QString();
+                param.supported = false;
+            }
+
+            params.append(param);
+        }
+    }
+
+    return params;
+}
+
+NpuParamSetResult NpuInfoProvider::setDeviceParam(
+    const QString &cardId,
+    const QString &chipId,
+    const QString &paramKey,
+    const QString &value) const
+{
+    NpuParamSetResult result;
+
+    bool known = false;
+    for (const DeviceParamDefinition &definition : deviceParamDefinitions()) {
+        if (definition.key == paramKey.trimmed()) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        result.message = QStringLiteral("Unknown device parameter: %1").arg(paramKey);
+        return result;
+    }
+
+    if (cardId.trimmed().isEmpty() || chipId.trimmed().isEmpty() || value.trimmed().isEmpty()) {
+        result.message = QStringLiteral("Card ID, Chip ID and value are required.");
+        return result;
+    }
+
+    const CommandAttempt attempt = runCommand({
+        QStringLiteral("set"),
+        QStringLiteral("-t"),
+        paramKey.trimmed(),
+        QStringLiteral("-i"),
+        cardId.trimmed(),
+        QStringLiteral("-c"),
+        chipId.trimmed(),
+        QStringLiteral("-d"),
+        value.trimmed()
+    });
+
+    result.command = attempt.command;
+    if (attempt.exitCode == 0) {
+        result.success = true;
+        result.message = attempt.stdOut.trimmed().isEmpty()
+            ? QStringLiteral("OK")
+            : attempt.stdOut.trimmed();
+    } else {
+        result.message = attempt.stdErr.trimmed().isEmpty()
+            ? (attempt.stdOut.trimmed().isEmpty()
+                ? QStringLiteral("npu-smi set failed with exit code %1.").arg(attempt.exitCode)
+                : attempt.stdOut.trimmed())
+            : attempt.stdErr.trimmed();
+    }
+
+    return result;
 }
 
 QVector<NpuCard> NpuInfoProvider::parseCardList(const QString &output) const
@@ -730,6 +884,67 @@ double NpuInfoProvider::parseNumericValue(const QString &value, bool *ok) const
         *ok = localOk;
     }
     return localOk ? parsed : 0.0;
+}
+
+QString NpuInfoProvider::parseParamValue(const QString &output, const QStringList &fieldKeywords) const
+{
+    if (output.trimmed().isEmpty() || fieldKeywords.isEmpty()) {
+        return QString();
+    }
+
+    const QRegularExpression keyedPattern(QStringLiteral("^\\s*(.+?)\\s*[:=]\\s*(.+?)\\s*$"));
+
+    for (const QString &rawLine : output.split('\n')) {
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty() || looksLikeSeparator(line)) {
+            continue;
+        }
+
+        const QRegularExpressionMatch match = keyedPattern.match(line);
+        if (!match.hasMatch()) {
+            continue;
+        }
+
+        const QString key = match.captured(1).trimmed();
+        const QString value = cleanValue(match.captured(2));
+
+        for (const QString &keyword : fieldKeywords) {
+            if (key.contains(keyword.trimmed(), Qt::CaseInsensitive)) {
+                if (value.isEmpty()) {
+                    continue;
+                }
+                bool numericOk = false;
+                const double number = parseNumericValue(value, &numericOk);
+                if (numericOk) {
+                    return QString::number(number);
+                }
+                return value;
+            }
+        }
+    }
+
+    return QString();
+}
+
+bool NpuInfoProvider::parseParamValueAsDouble(
+    const QString &output,
+    const QStringList &fieldKeywords,
+    double *value) const
+{
+    const QString text = parseParamValue(output, fieldKeywords);
+    if (text.isEmpty()) {
+        return false;
+    }
+
+    bool ok = false;
+    const double parsed = parseNumericValue(text, &ok);
+    if (!ok) {
+        return false;
+    }
+    if (value != nullptr) {
+        *value = parsed;
+    }
+    return true;
 }
 
 QStringList NpuInfoProvider::extractCardIds(const QVector<NpuCard> &cards, const QVector<NpuMappingEntry> &mappings) const
